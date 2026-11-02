@@ -1,0 +1,15 @@
+version: 1.0.{build}
+image: Visual Studio 2022
+platform: x64
+configuration: Release
+
+before_build:
+  - nuget restore SickoMenu.sln
+
+build:
+  project: SickoMenu.sln
+  verbosity: minimal
+
+artifacts:
+  - path: '**\*.dll'
+  - path: '**\*.exe'
