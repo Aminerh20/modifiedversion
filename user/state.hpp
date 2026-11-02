@@ -1,0 +1,979 @@
+#pragma once
+#include <set>
+#include <bitset>
+#include <queue>
+#include <unordered_set>
+#include "_events.h"
+#include "_rpc.h"
+#include "keybinds.h"
+#include "game.h"
+#include "replay.hpp"
+
+template<typename T>
+constexpr T SafeMax(const T& a, const T& b) {
+    return (a > b) ? a : b;
+}
+
+class Settings {
+public:
+
+    KeyBinds::Config KeyBinds = {
+        VK_DELETE, // toggle menu
+        VK_INSERT, // toggle radar
+        VK_HOME, // toggle console
+        VK_NEXT, // repair sabotage
+        VK_CONTROL, // noclip
+        0x00, // autokill
+        0x00, // close all doors
+        0x00, // toggle zoom
+        0x00, // toggle freecam
+        0x00, // close current room door
+        VK_END, // toggle replay
+        0x00, //toggle chat always active
+        0x00, //toggle read ghost messages
+        0x00, //toggle HUD
+        0x00, //reset appearance
+        0x00, //save appearance
+        0x00, //complete tasks
+        VK_PAUSE, //toggle SickoMenu
+        0x00 //cancel start
+    };
+
+    std::string selectedConfig = "default";
+    int selectedConfigInt = 0;
+
+    bool ImGuiInitialized = false;
+    bool HasOpenedMenuBefore = false;
+    bool ShowMenuOnStartup = true;
+    bool ShowMenu = true;
+
+#ifdef _DEBUG
+    bool showDebugTab = false;
+#endif
+    bool RgbMenuTheme = false;
+    bool GradientMenuTheme = false;
+    bool MatchBackgroundWithTheme = false;
+    bool SetName = false;
+    bool SafeMode = true;
+    bool UnlockCosmetics = true;
+    int GameFPS = 60;
+    bool SpoofLevel = false;
+    int FakeLevel = 1;
+    bool KeybindsWhileChatting = true;
+    bool SpoofFriendCode = false;
+    bool UseNewFriendCode = false;
+    bool UseGuestPuid = false;
+    std::string NewFriendCode = "";
+    std::string FakeFriendCode = "";
+    std::string GuestPuid = "";
+    std::string FakePuid = "";
+    std::string StealedFC = "";
+    std::string StealedPUID = "";
+    bool SpoofPlatform = false;
+    bool SpoofPsnId = false;
+    bool SpoofXboxId = false;
+    int FakePlatform = 0;
+    uint64_t FakePsnId = 0;
+    uint64_t FakeXboxId = 0;
+    bool SpoofPlName = false;
+    std::string FakePlName = "TESTNAME";
+    bool UseCustomServer = false;
+    std::string CustomServerIp = "";
+    uint16_t CustomServerPort = 22023;
+    bool ForceDTLS = false;
+    bool SpoofGuestAccount = false;
+    bool SpoofModdedHost = false;
+    bool SpoofAUVersion = false;
+    int FakeAUVersion = 1;
+    bool DisableAnimations = false;
+    bool ClickThroughMenuUI = false;
+    bool ShowUiBorders = true;
+    float AnimationSpeed = 1.f;
+    float RoundingRadiusMultiplier = 1.f;
+
+    bool ToastsOnTop = false;
+    int ToastPositionX = 0; // for alignment; 0: left, 1: middle, 2: right
+    int MaxToasts = 6;
+    float ToastMaxDuration = 5.f;
+
+    bool AdjustByDPI = true;
+    float dpiScale = 1.f;
+    bool dpiChanged = false;
+    bool unlockAllAchievements = false;
+
+    std::string CurrentScene;
+
+    bool MaxVision = false;
+    float PrevPlayerSpeed = 1.f;
+    float PlayerSpeed = 1.f;
+    bool MultiplySpeed = false;
+    float PrevKillCooldown = 30.f;
+    float KillCooldown = 30.f;
+    float PrevGACooldown = 60.f;
+    float GACooldown = 60.f;
+    float CycleTimer = 0.5f;
+    float PrevCycleTimer = 0.5f;
+    float CycleDuration = CycleTimer * 50;
+    bool UnlockVents = false;
+    bool RolesBypassCommsSabotage = false;
+    bool KillImmunity = false;
+    bool UnlockKillButton = false;
+    bool ShowGhosts = false;
+    bool ShowPhantoms = false;
+    bool ShowPlayersInVents = false;
+    int FakeRole = 0;
+    int FakeRoleId = 0;
+    bool AutoFakeRole = false;
+    bool DisableVents = false;
+    bool PauseVentBlockingWhileVenting = false;
+    bool SpamReport = false;
+    bool CrashSpamReport = false;
+    bool RandomSpawns = false;
+    bool Overflow = false;
+    bool DisableMeetings = false;
+    bool DisableSabotages = false;
+    bool DisableAllVotekicks = false;
+    bool DisableRoleManager = false;
+    bool DisableKills = false;
+    bool BattleRoyale = false;
+    bool TaskSpeedrun = false;
+    float SpeedrunTimer = 0.f;
+    bool SpeedrunOver = false;
+    int GameMode = 0;
+    bool UseGameModeDuration = false;
+    int GameModeDuration = 240;
+    float GameModeDurationTimer = 0.f; 
+    bool GameModeDurationOver = false; 
+    bool NoGameEnd = false;
+    bool ChatSpam = false;
+    bool CrashChatSpam = false;
+    bool ChatSpamEveryone = false;
+    int ChatSpamMode = 0;
+    int CrashChatSpamMode = 1;
+    bool AutoJoinLobby = false;
+    bool AutoRejoinOnKick = false;
+    std::string PendingRejoinTargetFC = "";
+    bool PendingRejoinReady = false;
+    std::unordered_map<int32_t, int> VotekickRejoinCount;
+    bool VotekickRejoinPending = false;
+    float VotekickRejoinDelay = 0.f;
+    std::string VotekickRejoinLobbyCode = "";
+    std::string AutoJoinLobbyCode = "";
+    bool JoinLobby = false;
+    std::string JoinLobbyCode = "";
+    std::unordered_map<std::string, std::string> LobbyHostCache;
+    int LobbyHistoryLimit = 20;
+    static const int LobbyHistoryMaxStored = 50;
+    bool IgnoreRPCs = false;
+
+    bool ShowProtections = false;
+    std::map<Game::PlayerId, std::pair<Game::ColorId, float/*Time*/>> protectMonitor;
+    std::mutex protectMutex;
+
+    bool RefreshChatButton = false;
+    bool RevealVotes = false;
+    bool RevealAnonymousVotes = false;
+    bool ShowChatTimer = false;
+    bool ExtendChatLimit = false;
+    bool ExtendChatHistory = false;
+
+    bool AutoApplyHostPreset = false;
+    struct RolePreset {
+        int32_t Count = 0;
+        int32_t Chance = 0;
+    };
+    struct HostPreset {
+        std::string Name = "Preset";
+        // Base settings
+        float PlayerSpeed = 1.f;
+        float CrewmateVision = 1.f;
+        float ImpostorVision = 1.5f;
+        float KillCooldown = 45.f;
+        int KillDistance = 1;
+        int NumImpostors = 1;
+        int MaxPlayers = 15;
+        uint8_t MapId = 0;
+        bool VisualTasks = true;
+        bool ConfirmImpostor = true;
+        bool AnonymousVotes = false;
+        int NumEmergencyMeetings = 1;
+        int EmergencyCooldown = 15;
+        int DiscussionTime = 15;
+        int VotingTime = 120;
+        int TaskBarMode = 0;
+        int NumCommonTasks = 1;
+        int NumLongTasks = 1;
+        int NumShortTasks = 1;
+        // Role counts and chances
+        std::map<int, RolePreset> RoleRates; // key = RoleTypes__Enum int value
+        // Role-specific settings
+        float ShapeshifterCooldown = 10.f;
+        float ShapeshifterDuration = 3.f;
+        bool ShapeshifterLeaveSkin = false;
+        float GuardianAngelCooldown = 60.f;
+        bool GuardianAngelProtectVisible = false;
+        float GuardianAngelProtectDuration = 10.f;
+        float ScientistCooldown = 15.f;
+        float ScientistBatteryCharge = 5.f;
+        float EngineerCooldown = 10.f;
+        float EngineerInVentMaxTime = 10.f;
+        float PhantomCooldown = 10.f;
+        float PhantomDuration = 3.f;
+        float TrackerCooldown = 10.f;
+        float TrackerDuration = 5.f;
+        float TrackerDelay = 2.f;
+        float NoisemakerAlertDuration = 3.f;
+        bool NoisemakerImpostorAlert = true;
+        float ViperDissolveTime = 3.f;
+        float DetectiveSuspectLimit = 3.f;
+        float JudgeTaskRequirement = 50.f;
+        float InfluencerMessageCooldown = 50.f;
+    };
+    std::vector<HostPreset> HostPresets;
+    int SelectedHostPreset = 0;
+
+    struct CosmeticPreset {
+        std::string Name = "Preset";
+        std::string HatId = "";
+        std::string SkinId = "";
+        std::string VisorId = "";
+        std::string PetId = "";
+        std::string NamePlateId = "";
+        int32_t ColorId = 0;
+    };
+    std::vector<CosmeticPreset> CosmeticPresets;
+    int SelectedCosmeticPreset = 0;
+    bool AutoApplyCosmeticPreset = false;
+
+    bool ShowKillCD = false;
+
+    bool ChatPaste = false;
+    bool RevealRoles = false;
+    bool AbbreviatedRoleNames = false;
+    bool LocalizeRoleNames = false;
+    bool PlayerColoredDots = false;
+    bool ShowPlayerInfo = false;
+    bool HideWhitelistedPlayerInfo = true;
+    bool ShowLobbyInfo = false;
+    float PrevKillDistance = 0.f;
+    float KillDistance = 0.f;
+    float GameKillDistance = 0.f;
+    bool ModifyKillDistance = false;
+    int PrevTaskBarUpdates = 0;
+    int TaskBarUpdates = 0;
+    bool ModifyTaskBarUpdates = false;
+    bool PrevVisualTasks = true;
+    bool VisualTasks = true;
+    bool PrevShowNames = false;
+    bool ShowNames = false;
+    bool Cycler = false;
+    bool CycleName = false;
+    bool RandomColor = false;
+    bool RandomHat = false;
+    bool RandomSkin = false;
+    bool RandomVisor = false;
+    bool RandomPet = false;
+    bool RandomNamePlate = false;
+    bool CycleForEveryone = false;
+    bool ForceNameForEveryone = false;
+    bool CustomNameForEveryone = false;
+    bool ForceColorForEveryone = false;
+    bool CustomName = false;
+    bool RgbName = false;
+    int ColorMethod = 0;
+    int RgbMethod = 0;
+    bool UsePrefixAndSuffix = false;
+    bool PrefixAndSuffixNewLines = true;
+    std::string NamePrefix = "";
+    std::string NameSuffix = "";
+    bool Font = false;
+    int FontType = 0;
+    bool ChatFont = false;
+    int ChatFontType = 0;
+    //bool Material = false;
+    //int MaterialType = 0;
+    bool CustomRgbName = false;
+    bool ResizeName = false;
+    bool IndentName = false;
+    bool CspaceName = false;
+    bool MspaceName = false;
+    bool VoffsetName = false;
+    bool RotateName = false;
+    float NameSize = 1.f;
+    float NameIndent = 0.f;
+    float NameCspace = 0.f;
+    float NameMspace = 0.f;
+    float NameVoffset = 0.f;
+    float NameRotate = 0.f;
+    bool ItalicName = false;
+    bool UnderlineName = false;
+    bool StrikethroughName = false;
+    bool BoldName = false;
+    bool NobrName = false;
+    bool ColoredName = false;
+    ImVec4 NameColor1 = ImVec4(1.f, 1.f, 1.f, 1.f);
+    ImVec4 NameColor2 = ImVec4(1.f, 1.f, 1.f, 1.f);
+    float RgbNameColor = 0.f;
+    bool ServerSideCustomName = false;
+    bool NoAbilityCD = false;
+    bool DarkMode = false;
+    bool SeeVanishedPlayers = false;
+    bool CycleInMeeting = true;
+    bool CycleBetweenPlayers = false;
+    bool CycleBetweenOutfits = false;
+    bool ChangeBodyType = false;
+    int BodyType = 0;
+    bool ShowTime = false;
+    int TimeOffsetMinutes = 0;
+    bool NegativeTimeOffset = false;
+    bool Use12HourFormat = false;
+    bool ShowSeconds = false;
+    bool UseLeadingZeroForHours = true;
+    std::string AmString = "AM";
+    std::string PmString = "PM";
+
+    bool NoClip = false;
+    bool HotkeyNoClip = false;
+
+    bool DisableLights = false;
+    bool DisableLightSwitches = false;
+    bool DisableComms = false;
+    bool DisableReactor = false;
+    bool DisableOxygen = false;
+    bool InfiniteMushroomMixup = false;
+    bool SpamDoors = false;
+    bool AutoRepairSabotage = false;
+
+    bool MoveInVentAndShapeshift = false;
+    bool AlwaysMove = false;
+    bool AnimationlessShapeshift = false;
+    bool DisableKillAnimation = false;
+    bool KillImpostors = false;
+    bool KillInVanish = false;
+    bool OnlyProtectCrewmates = false;
+    std::vector<uint8_t> ColorCycledPlayers;
+    std::vector<uint8_t> VoteImmunePlayers;
+    std::unordered_map<uint8_t, uint8_t> VoteRedirectTargets;
+    bool BypassAngelProt = false;
+    bool InfiniteKillRange = false;
+    bool KillInLobbies = false;
+    bool AutoKill = false;
+    bool FakeAlive = false;
+    bool ShowHost = false;
+    bool HideWatermark = false;
+    bool HideModStamp = false;
+    bool ShowVoteKicks = false;
+    bool ShowFps = false;
+    bool DoTasksAsImpostor = false;
+    bool AlwaysUseKillExploit = false;
+    bool AutoCopyLobbyCode = false;
+    bool DisableLobbyMusic = false;
+    bool ReportOnMurder = false;
+    bool PreventSelfReport = true;
+    bool AutoRejoin = false;
+    bool DisableShushAnimation = false;
+    bool ControlPet = false;
+    bool ControlHand = false;
+    bool DisableControlPetHand = false;
+    bool OldStylePingText = false;
+    bool NoSeekerAnim = false;
+    bool BetterChatNotifications = false;
+    bool BetterLobbyCodeInput = false;
+    bool BetterMessageSounds = false;
+    bool ExtendedNotifications = false;
+    AudioClip* MessageSound = NULL;
+
+    PlayerSelection selectedPlayer;
+    std::vector<uint8_t> selectedPlayers = {};
+    std::queue<RPCInterface*> rpcQueue;
+    std::queue<RPCInterface*> lobbyRpcQueue;
+    std::queue<RPCInterface*> taskRpcQueue;
+
+    bool ShowRadar = false;
+    bool ShowRadar_DeadBodies = false;
+    bool ShowRadar_Ghosts = false;
+    bool HideRadar_During_Meetings = false;
+    bool ShowRadar_RightClickTP = false;
+    bool ShowRadar_ShiftLeftClickClosesRoomDoor = false;
+    bool LockRadar = false;
+    bool RadarDrawIcons = false;
+    bool RadarVisorRoleColor = false;
+    bool RadarBorder = false;
+    int RadarExtraWidth = 0;
+    int RadarExtraHeight = 0;
+    bool HoveringOverAnyWindowButRadar = false;
+
+    bool ShowEsp = false;
+    bool ShowEsp_Players = true;
+    bool ShowEsp_Ghosts = false;
+    bool ShowEsp_DeadBodies = false;
+    bool ShowEsp_LineTextShadows = false;
+    float ShowEsp_LineThickness = 3.f;
+    float ShowEsp_TextSize = 1.5f;
+    bool ShowEsp_Box = true;
+    bool ShowEsp_Tracers = true;
+    bool ShowEsp_Distance = true;
+    bool HideEsp_During_Meetings = false;
+    bool ShowEsp_RoleBased = false;
+    bool ShowEsp_Crew = true;
+    bool ShowEsp_Imp = true;
+
+    bool InMeeting = false;
+    bool InExileUI = false;
+    bool HasRefreshedUI = false;
+    bool PlayMedbayScan = false;
+    bool PlayWeaponsAnimation = false;
+
+    bool ChatAlwaysActive = false;
+    bool ChatActiveOriginalState = false;
+    bool ReadGhostMessages = false;
+    bool ReadAndSendSickoChat = false;
+    bool MoveMatchInfoGuide = false;
+    bool ShiftRightClickTP = false;
+    bool TeleportEveryone = false;
+    bool RotateEveryone = false;
+    bool RotateServerSide = false;
+    bool RelativeTeleport = false;
+    bool Mod_EnableModeration = false;
+    std::string Mod_SickoSocials = "";
+    std::queue<std::string> Mod_PendingRulesMessages;
+    float Mod_PendingRulesDelay = 0.f;
+    std::vector<std::string> Mod_RoleNames = {};
+    std::vector<std::vector<std::string>> Mod_RoleMembers = {};
+    std::vector<std::map<std::string, bool>> Mod_RolePermissions = {};
+    std::vector<int> Mod_RoleRank = {};
+    bool SpamVentTpEveryone = false;
+    bool SpamVentTpEveryoneRandom = false;
+    bool IgnoreVentTpSelf = false;
+    bool SpamZiplineEveryone = false;
+    bool IgnoreZiplineSelf = false;
+    int SelectedVentId = 0;
+    std::vector<Game::PlayerId> spamRandomVentTpPlayers = {};
+    std::vector<Game::PlayerId> spamZiplinePlayers = {};
+    std::map<Game::PlayerId, int> spamVentTpPlayers = {};
+    float RotateRadius = 1.f;
+    float xCoordinate = 0.f;
+    float yCoordinate = 0.f;
+
+    bool confuser = false;
+    bool confuseOnJoin = false;
+    bool confuseOnStart = false;
+    bool confuseOnKill = false;
+    bool confuseOnVent = false;
+    bool confuseOnMeeting = false;
+
+    bool AntiExploit_DisconnectPenalties = true;
+    bool AntiExploit_UnauthorizedSabotages = true;
+    bool AntiExploit_UnauthorizedTeleports = true;
+    bool AntiExploit_UnauthorizedZiplines = true;
+    bool AntiExploit_AttemptToBan = true;
+    bool AntiExploit_VotekicksAgainstSelfHost = true;
+    bool AntiExploit_CrashLobbyHost = true;
+
+    bool AntiExploit_IsTeleportingSelf = false; // flag for when we vent TP ourselves
+    bool AntiExploit_IsClimbingZipline = false; // flag for when we climb a zipline
+
+    bool InfiniteMeetings = false;
+    bool NoLadderZiplineCooldown = false;
+    bool Engineer_NoVentCooldown = false;
+    bool Engineer_InfiniteVentTime = false;
+    bool Scientist_NoVitalsCooldown = false;
+    bool Scientist_InfiniteBattery = false;
+    bool Tracker_NoTrackingCooldown = false;
+    bool Tracker_InfiniteTracking = false;
+    bool Detective_NoInterrogateCooldown = false;
+    bool Judge_NoTaskRequirement = false;
+    bool Judge_InfiniteOverrules = false;
+    bool GuardianAngel_NoProtectCooldown = false;
+    bool Influencer_NoRefreshCooldown = false;
+    bool Impostor_NoKillCooldown = false;
+    bool Shapeshifter_InfiniteShapeshiftDuration = false;
+
+    std::vector<SystemTypes__Enum> selectedDoors;
+    std::vector<SystemTypes__Enum> mapDoors;
+    std::vector<SystemTypes__Enum> pinnedDoors;
+    bool CloseAllDoors = false;
+
+    bool ShowConsole = false;
+    bool ShowReplay = false;
+    bool ShowConsoleEventsAsToasts = false;
+    bool Replay_ShowOnlyLastSeconds = false;
+    int Replay_LastSecondsValue = 1;
+    bool Replay_ClearAfterMeeting = false;
+    bool Replay_DrawIcons = true;
+    std::chrono::system_clock::time_point MatchStart;
+    std::chrono::system_clock::time_point MatchCurrent;
+    std::chrono::system_clock::time_point MatchEnd;
+    std::chrono::system_clock::time_point MatchLive;
+    // NOTE:
+    // any code that modifies State.liveReplayEvents or any other collection should use the Replay.replayEventMutex
+    // failure to do so will invalidate any existing iterator of any thread which will lead to rare and hard to diagnose crashes
+    std::vector<std::unique_ptr<EventInterface>> liveReplayEvents;
+    std::vector<std::unique_ptr<EventInterface>> liveConsoleEvents;
+    std::array<ImVec2, Game::MAX_PLAYERS> lastWalkEventPosPerPlayer;
+    std::array<std::chrono::system_clock::time_point, Game::MAX_PLAYERS> replayDeathTimePerPlayer;
+    std::map<Game::PlayerId, Replay::WalkEvent_LineData> replayWalkPolylineByPlayer;
+    bool Replay_IsPlaying = true;
+    bool Replay_IsLive = true;
+
+    std::unordered_map<Game::Voter, Game::VotedFor> voteMonitor;
+
+    //std::vector<Game::PlayerId> aumUsers;
+    //std::vector<Game::PlayerId> sickoUsers;
+    std::vector<Game::PlayerId> vanishedPlayers;
+    std::vector<Game::PlayerId> validDeadBodyIds;
+    std::vector<Game::PlayerId> checkedPlayerIds;
+    std::map<Game::PlayerId, int> ventTpSeqIds;
+    std::map<Game::PlayerId, std::vector<std::string>> modUsers;
+    int32_t rpcCooldown = 15;
+    int32_t playerKilledId = 0;
+    std::string searchQuery = "";
+
+    std::array<PlayerControl*, Game::MAX_PLAYERS> assignedRolesPlayer = {};
+    std::array<RoleType, Game::MAX_PLAYERS> assignedRoles = {};
+    int mapHostChoice = 0;
+    int impostors_amount = 0;
+    int shapeshifters_amount = 0;
+    int phantoms_amount = 0;
+    int vipers_amount = 0;
+    int engineers_amount = 0;
+    int scientists_amount = 0;
+    int trackers_amount = 0;
+    int noisemakers_amount = 0;
+    int detectives_amount = 0;
+    int judges_amount = 0;
+    int crewmates_amount = 0;
+
+    bool Wallhack = false;
+    bool FreeCam = false;
+    float FreeCamSpeed = 1.f;
+
+    float CameraHeight = 3.f;
+    Camera* FollowerCam = nullptr;
+    ShadowCollab* shadowCollab = nullptr;
+    bool EnableZoom = false;
+    bool EnableZoom_ScrollZoom = true;
+    bool EnableZoom_SmoothZoom = true;
+    bool EnableZoom_ShowShadows = false;
+    bool EnableZoom_ResolutionSetFlag = false;
+    float EnableZoom_PreResolutionSetCamHeight = 3.f;
+
+    bool MIG_ThemeChanged = true;
+
+    VersionShower* versionShower = nullptr;
+    std::string versionShowerDefaultText = "";
+
+    bool DisableHud = false;
+    bool GodMode = false;
+
+    bool ActiveAttach = false;
+    bool ActiveShapeshift = false;
+
+    bool FakeCameraUsage = false;
+
+    bool LightMode = false;
+    bool CustomGameTheme = false;
+    ImVec4 MenuThemeColor = ImVec4(1.f, 0.f, 0.424f, 1.f);
+    ImVec4 MenuGradientColor = ImVec4(1.f, 0.f, 0.424f, 1.f);
+    ImVec4 MenuGradientColor1 = ImVec4(1.f, 0.f, 0.424f, 1.f);
+    ImVec4 MenuGradientColor2 = ImVec4(1.f, 0.f, 0.424f, 1.f);
+    ImVec4 RgbColor = ImVec4(1.f, 0.071f, 0.f, 1.f);
+    ImVec4 SelectedColor = ImVec4(1.f, 1.f, 1.f, 0.75f);
+    ImVec4 SelectedReplayMapColor = ImVec4(1.f, 1.f, 1.f, 0.75f);
+    ImVec4 GameTextColor = ImVec4(0.f, 0.f, 0.f, 1.f);
+    ImVec4 GameBgColor = ImVec4(1.f, 1.f, 1.f, 1.f);
+
+    ImVec4 CrewmateGhostColor = ImVec4(0.482f, 0.741f, 0.580f, 0.5f);
+    ImVec4 CrewmateColor = ImVec4(0.071f, 0.984f, 0.996f, 1.f);
+    ImVec4 EngineerColor = ImVec4(0.043f, 0.506f, 0.780f, 1.f);
+    ImVec4 GuardianAngelColor = ImVec4(0.129f, 0.737f, 0.988f, 0.5f);
+    ImVec4 ScientistColor = ImVec4(0.318f, 0.067f, 0.835f, 1.f);
+    ImVec4 ImpostorColor = ImVec4(0.898f, 0.118f, 0.267f, 1.f);
+    ImVec4 ShapeshifterColor = ImVec4(0.839f, 0.60f, 0.227f, 1.f);
+    ImVec4 ImpostorGhostColor = ImVec4(0.671f, 0.384f, 0.553f, 0.5f);
+    ImVec4 NoisemakerColor = ImVec4(0.212f, 0.898f, 0.180f, 1.f);
+    ImVec4 TrackerColor = ImVec4(0.737f, 0.235f, 0.863f, 1.f);
+    ImVec4 PhantomColor = ImVec4(0.443f, 0.235f, 0.075f, 1.f);
+    ImVec4 DetectiveColor = ImVec4(0.718f, 0.678f, 0.980f, 1.f);
+    ImVec4 ViperColor = ImVec4(1.0f, 0.937f, 0.455f, 1.f);
+    ImVec4 JudgeColor = ImVec4(0.0f, 0.588f, 0.204f, 1.f);
+    ImVec4 InfluencerColor = ImVec4(0.486f, 0.f, 0.596f, 0.5f);
+
+    ImVec4 HostColor = ImVec4(1.f, 0.73f, 0.f, 1.f);
+    ImVec4 PlayerIdColor = ImVec4(1.f, 0.f, 0.f, 1.f);
+    ImVec4 LevelColor = ImVec4(0.f, 1.f, 0.f, 1.f);
+    ImVec4 PlatformColor = ImVec4(0.73f, 0.f, 1.f, 1.f);
+    ImVec4 ModUsageColor = ImVec4(1.f, 0.73f, 0.f, 1.f);
+    ImVec4 NameCheckerColor = ImVec4(1.f, 0.67f, 0.f, 1.f);
+    ImVec4 FriendCodeColor = ImVec4(0.2f, 0.6f, 1.f, 1.f);
+    ImVec4 DaterNamesColor = ImVec4(1.f, 0.f, 0.f, 1.f);
+    ImVec4 LobbyCodeColor = ImVec4(1.f, 0.73f, 0.f, 1.f);
+    ImVec4 AgeColor = ImVec4(0.f, 1.f, 0.f, 1.f);
+
+    Game::ColorId SelectedColorId = 0; // Red
+    Game::ColorId RandomColorId = 0; // Red
+    Game::ColorId HostSelectedColorId = 0; //Red
+    int SelectedRoleId = 0; // Crewmate
+    int SelectedGameEndReasonId = 0;
+    std::string originalName = "-";
+    String* originalNamePlate = nullptr;
+    String* originalSkin = nullptr;
+    String* originalHat = nullptr;
+    String* originalVisor = nullptr;
+    String* originalPet = nullptr;
+    String* cyclerNamePlate = nullptr;
+    String* cyclerSkin = nullptr;
+    String* cyclerHat = nullptr;
+    String* cyclerVisor = nullptr;
+    String* cyclerPet = nullptr;
+    Game::ColorId originalColor = Game::NoColorId;
+
+    bool SnipeColor = false;
+    bool activeImpersonation = false;
+    bool activeChatSpoof = false;
+    bool activeWhisper = false;
+
+    PlayerSelection playerToFollow;
+    PlayerSelection playerToAttach;
+    PlayerSelection playerToChatAs;
+    PlayerSelection playerToWhisper;
+
+    Vector3 camPos = { NULL, NULL, NULL };
+    Vector3 prevCamPos = { NULL, NULL, NULL };
+    Vector2 petPos = { NULL, NULL };
+
+    bool FlipSkeld = false;
+    bool CustomImpostorAmount = false;
+    int ImpostorCount = 1;
+    bool DisableCallId = false;
+    uint8_t ToDisableCallId = 0;
+    uint8_t VoteKicks = 0;
+
+    bool OcclusionCulling = false;
+    bool ShowUnityLogs = true;
+    bool ShowHookLogs = false;
+
+    float LobbyTimer = 600.f;
+    bool ShowLobbyTimer = false;
+    bool SpamMovingPlatform = false;
+    bool JoinedLobby = false;
+    bool JoinedAsHost = false;
+    float ChatCooldown = 0.f;
+    bool MessageSent = false;
+    bool ChatFocused = false;
+    bool IsRevived = false;
+    bool IsAdminMapOpen = false;
+
+    std::string chatMessage = "";
+    std::string userName = "";
+    std::vector<std::string> cyclerUserNames = {};
+    int cyclerNameGeneration = 0;
+    int confuserNameGeneration = 0;
+    std::string rgbCode = "";
+    std::string hostUserName = "";
+    std::string customCode = "SICKOS";
+    bool HideCode = false;
+    bool RgbLobbyCode = false;
+    std::map<std::string, std::map<std::string, std::string>> playerOutfits = {};
+
+    bool PanicMode = false;
+    bool PanicWarning = true;
+    bool TempPanicMode = false; //prevent instant crash on joining lobby
+    bool BlinkPlayersTab = false; //prevent instant crash on player leaving
+    bool ModDetection = true;
+    int BroadcastedMod = 0;
+    bool ForceLoginAsGuest = false;
+    bool DisableHostAnticheat = false;
+    bool TournamentMode = false;
+    bool SpectatorMode = false;
+    bool CancelingStartGame = false;
+    bool IsStartCountdownActive = false;
+    bool AlwaysAllowStart = false;
+    bool ModifyStartCountdown = false;
+    int StartCountdown = 3;
+
+    std::unordered_set<std::string> Friends;
+    std::unordered_set<Game::PlayerId> InGameFriends;
+    std::vector<std::string /*friendcode*/> tournamentFriendCodes;
+    std::map<std::string /*friendcode*/, float /*points*/> tournamentPoints;
+    std::map<std::string /*friendcode*/, float /*points*/> tournamentWinPoints;
+    std::map<std::string /*friendcode*/, float /*points*/> tournamentCalloutPoints;
+    std::map<std::string /*friendcode*/, float /*points*/> tournamentEarlyDeathPoints;
+    std::map<std::string /*friendcode*/, float /*points*/> tournamentKillCaps;
+    std::vector<std::string> tournamentAssignedImpostors;
+    std::vector<std::string> tournamentAliveImpostors;
+    std::vector<std::string> tournamentCallers;
+    std::vector<std::string> tournamentCalledOut;
+    std::map<std::string, Game::PlayerId> tournamentCorrectCallers;
+    std::vector<Game::PlayerId> tournamentAllTasksCompleted;
+    bool tournamentFirstMeetingOver = false;
+    GameOverReason__Enum tournamentGameOverReason = GameOverReason__Enum::CrewmatesByVote; // default value should not affect end result
+
+    enum class MapType : uint8_t
+    {
+        Ship = 0,
+        Hq = 1,
+        Pb = 2,
+        Airship = 3,
+        Fungle = 4
+    } mapType = MapType::Ship;
+
+    enum class PointReason : uint8_t
+    {
+        ImpKill = 0,
+        ImpWin = 1,
+        AllImpsWin = 2,
+        ImpVoteOut = 3,
+        CrewVoteOut = 4,
+        ImpVoteOutCorrect = 5,
+        ImpVoteOutIncorrect = 6,
+        CrewWin = 7,
+        CorrectCallout = 8,
+        IncorrectCallout = 9,
+        ImpLose = 10,
+    };
+
+    bool CanChangeOutfit = false;
+    bool HasSpawnedIn = false;
+    float OverflowTimer = 0.f;
+    std::string OverflowCachedNamePlate = "";
+    bool MainMenuLoaded = false;
+    bool EndLoginFlowFlag = false;
+    QuickChatModes__Enum CurrentChatMode = QuickChatModes__Enum::FreeChatOrQuickChat;
+    bool WasPreviousMessageCommand = false;
+    uint8_t OutfitCooldown = 50;
+    RoleTypes__Enum RealRole = RoleTypes__Enum::Crewmate;
+    DisconnectReasons__Enum LastDisconnectReason = DisconnectReasons__Enum::Unknown;
+    std::string LastLobbyJoined = "";
+    bool IsPreHosting = false;
+    bool GameLoaded = false;
+    Game::PlayerId VoteOffPlayerId = Game::HasNotVoted;
+    bool LevelFarm = false;
+    bool AutoStartGame = false;
+    bool AutoKickSlackers = false;
+    bool AutoKickSlackersIgnoreWhitelist = true;
+    int AutoKickSlackersThreshold = 50;
+    int AutoKickSlackersGrace = 60;
+
+    int AutoStartTimer = 60;
+    bool AutoStartGamePlayers = false;
+    int AutoStartPlayerCount = 15;
+    bool AutoOpenDoors = false;
+    bool AutoHostRole = false;
+    RoleType HostRoleToSet = RoleType::Impostor;
+
+    bool AllowPreferredColor = false;
+
+    bool murderLoop = false;
+    bool suicideLoop = false;
+    bool farmLoop = false;
+    int murderCount = 0;
+    int murderDelay = 0;
+    int suicideCount = 0;
+    int suicideDelay = 0;
+    int farmCount = 0;
+    int farmDelay = 0;
+
+    Settings()
+    {
+        Replay::Reset();
+    }
+
+    std::string SickoVersion = "v[Major].[Minor].[Patch]";
+
+    bool Enable_SMAC = false;
+    int SMAC_Punishment = 0;
+    int SMAC_HostPunishment = 0;
+    std::unordered_map<std::string, int> SMAC_ReasonPunishmentOverride;
+    std::unordered_map<std::string, int> SMAC_ReasonPunishmentOverrideHost;
+    bool SMAC_AddToBlacklist = false;
+    bool SMAC_IgnoreWhitelist = false;
+    bool SMAC_PunishBlacklist = false;
+    bool SMAC_CheckOtherCheats = true;
+    bool SMAC_CheckSicko = true;
+    bool SMAC_CheckBadNames = true;
+    bool SMAC_CheckColor = true;
+    bool SMAC_CheckCosmetics = true;
+    bool SMAC_CheckChatNote = true;
+    bool SMAC_CheckScanner = true;
+    bool SMAC_CheckAnimation = true;
+    bool SMAC_CheckTasks = true;
+    bool SMAC_CheckRole = true;
+    bool SMAC_CheckChat = true;
+    bool SMAC_CheckMeeting = true;
+    bool SMAC_CheckReport = true;
+    bool SMAC_CheckMurder = true;
+    bool SMAC_CheckShapeshift = true;
+    bool SMAC_CheckVanish = true;
+    bool SMAC_CheckLevel = true;
+    bool SMAC_CheckVent = true;
+    bool SMAC_CheckSabotage = true;
+    bool SMAC_CheckTaskCompletion = true;
+    int SMAC_HighLevel = 10000;
+    int SMAC_LowLevel = 0;
+    std::vector<uint8_t> SMAC_AttemptBanLobby = {};
+    bool SMAC_CheckBadWords = true;
+    std::vector<std::pair<std::string, bool>> SMAC_BadWords = {}; 
+    bool SMAC_CheckFriendcode = true;
+    bool SMAC_CheckPlatformSpoof = true;
+    bool SMAC_CheckStartWords = false;
+    int SMAC_StartWordsThreshold = 1;
+    std::vector<std::pair<std::string, bool>> SMAC_StartWords = {}; 
+    std::map<uint8_t, int> SMAC_StartWordsCount;
+
+    struct ChatPreset {
+        std::string Name = "Preset";
+        std::vector<std::string> Messages = { "" }; 
+    };
+    std::vector<ChatPreset> ChatPresets = {};
+    int SelectedChatPreset = 0;
+
+    std::vector<std::string> WhitelistFriendCodes = {};
+    std::vector<std::string> BlacklistFriendCodes = {};
+
+    std::vector<std::string> LockedNames = {};
+
+    std::unordered_set<uint8_t> SMAC_PunishedPlayers;
+
+    std::string lol = "";
+    bool ProGamer = false;
+    bool KeybindsBeingEdited = false;
+    bool IsFreePlay = false;
+    bool IsProcessingSickoChat = false;
+    bool ShouldIgnoreBroadcastVersionHook = false;
+
+    bool Destruct_IgnoreWhitelist = true;
+    bool Ban_IgnoreWhitelist = true;
+    bool BanEveryone = false;
+    bool KickEveryone = false;
+    bool KickAFK = false;
+    float AutoPunishDelay = 0.f;
+    bool NotificationsAFK = false;
+    bool SecondChance = false;
+    float TimerAFK = 40.f;
+    float AddExtraTime = 15.0f;
+    float ExtraTimeThreshold = 5.0f;
+    float NotificationTimeWarn = 5.0f;
+
+    bool KickByLockedName = false;
+    bool ShowPDataByNC = false;
+
+    bool AprilFoolsMode = false;
+    bool BrainrotEveryone = false;
+    bool RizzUpEveryone = false;
+    bool DiddyPartyMode = false;
+    bool BypassVisualTasks = false;
+
+    // Anti-Overload [RPC 101 | Dependencies]
+    std::unordered_map<int32_t, std::chrono::steady_clock::time_point> Rpc101OverloadTimestamps;
+    std::chrono::steady_clock::time_point lastRpc101WindowStart = std::chrono::steady_clock::now();
+    int rpc101Counter = 0;
+    const int RPC101_LIMIT = 30;
+
+    // Task anomaly detection [SMAC | Dependencies]
+    std::unordered_map<uint8_t, std::chrono::steady_clock::time_point> lastTaskCompletionTime;
+    std::unordered_map<uint8_t, int> taskCompletionCounter;
+    int MAX_TASK_COMPLETIONS = 3; // Max tasks that can be completed in the detection window
+    float TASK_DETECTION_WINDOW = 2.0f; //time in seconds 
+
+    // Player tab [Crash-fix | Dependencies]
+    std::unordered_map<uint8_t, std::chrono::steady_clock::time_point> newPlayersAppear;
+    std::unordered_set<uint8_t> knownPlayers;
+    std::unordered_set<uint8_t> finishedPlayers;
+    std::unordered_set<uint8_t> currentPlayers;
+    static constexpr float appearDuration = 0.5f;
+
+    // Name-Checker [Dependencies]
+    std::unordered_set<std::string> ForbiddenNames;
+    std::unordered_set<std::string> CurrentForbiddenNames;
+    std::unordered_set<std::string> CurrentNames;
+
+    // Advanced Whitelist + Extra Commands [Dependencies]
+    std::unordered_set<std::string> NotifiedFriendCodes;
+    bool KickByWhitelist = false;
+    bool WhitelistNotifications = false;
+    bool ExtraCommands = false;
+
+    // Ban Auto-Leave Players [Dependencies]
+    std::unordered_map<std::string, int> joinLeaveCount;
+    std::unordered_set<std::string> activeFriendCodes;
+    bool BanLeavers = false;
+    bool BL_AutoLeavers = false;
+    float LeaveCount = 1.0;
+
+    // Kick/Ban Warned Players [Dependencies]
+    std::unordered_map<std::string, int> WarnedFriendCodes;
+    std::unordered_map<std::string, std::vector<std::string>> WarnReasons;
+    std::unordered_set<std::string> NotifiedWarnedPlayers;
+    double LastWarnTime = -100.f;
+    int MaxWarns = 1;
+    bool BanWarned = false;
+    bool KickWarned = false;
+    bool NotifyWarned = false;
+
+    // Auto-Exit Due Low FPS
+    std::chrono::steady_clock::time_point lastFrameTime = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point lowFpsStartTime = {};
+    bool LeaveDueLFPS = false;
+    int minFpsThreshold = 15;
+
+    // Ban/kick Everyone [Dependency]
+    std::unordered_map<uint32_t, std::chrono::steady_clock::time_point> playerPunishTimers;
+
+    // Temp-Ban [Dependencies]
+    bool TempBanEnabled = true;
+    std::unordered_map<std::string, std::chrono::system_clock::time_point> TempBannedFCs;
+    int64_t MAX_BAN_SECONDS = static_cast<int64_t>(100) * 365 * 86400; // also it prevents runtime error (int overflow)
+
+    // Disable Tasks
+    std::unordered_set<int> DisabledTaskTypes;
+    std::set<int> DisabledSabotageTypes;
+
+    /*int BanDays = 0;
+    int BanHours = 0;
+    int BanMinutes = 0;
+    int BanSeconds = 0;*/
+
+    // Player History [Dependencies]
+    struct RememberedPlayer {
+        std::string Nick;
+        std::string FriendCode;
+        std::string Puid;
+        int Level = 0;
+        std::string Platform;
+        bool NameCheck = false;
+        bool IsModded = false;
+        std::string ModClient;
+    };
+
+    std::deque<RememberedPlayer> PlayerHistory;
+
+    struct RememberedLobby {
+        std::string Code;
+        std::string HostName;
+    };
+    std::deque<RememberedLobby> LobbyHistory;
+    std::unordered_set<std::string> RemovedPlayers;
+    std::map<std::string, bool> platformFilters = {
+    {"Epic Games (PC)", true},
+    {"Steam (PC)", true},
+    {"Mac", true},
+    {"Microsoft Store (PC)", true},
+    {"itch.io (PC)", true},
+    {"iOS/iPadOS (Mobile)", true},
+    {"Android (Mobile)", true},
+    {"Nintendo Switch (Console)", true},
+    {"Xbox (Console)", true},
+    {"Playstation (Console)", true},
+    {"Unknown", true}
+    };
+
+    bool IgnoreOriginalInit_NotificationPopper = true;
+
+    void Load();
+    void Save();
+    void SaveConfig();
+    void Delete();
+};
+
+extern Settings State;

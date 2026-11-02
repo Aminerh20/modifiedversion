@@ -1,0 +1,364 @@
+#include "pch-il2cpp.h"
+#include "_rpc.h"
+#include "game.h"
+#include "state.hpp"
+#include "toasts.hpp"
+#include "logger.h"
+#include "utility.h"
+
+std::string SafelyReadString(MessageReader* reader) {
+	int32_t pos = reader->fields._position, head = reader->fields.readHead;
+	int32_t num = MessageReader_ReadPackedInt32(reader, NULL);
+	bool hasString = MessageReader_get_BytesRemaining(reader, NULL) >= num;
+	reader->fields._position = pos;
+	reader->fields.readHead = head;
+
+	return hasString ? convert_from_string(MessageReader_ReadString(reader, NULL)) : "";
+}
+
+void HandleRpc(PlayerControl* player, uint8_t callId, MessageReader* reader) {
+	if (player == nullptr) return;
+
+	uint8_t playerId = player->fields.PlayerId; //true mod detection
+
+	if (callId == 101) {
+		if (State.PanicMode || !State.ReadAndSendSickoChat) return;
+
+		using namespace std::chrono;
+
+		auto now = steady_clock::now();
+		if (duration_cast<seconds>(now - State.lastRpc101WindowStart).count() >= 1) {
+			State.lastRpc101WindowStart = now;
+			State.rpc101Counter = 0;
+		}
+
+		if (++State.rpc101Counter > State.RPC101_LIMIT) {
+			if (player && player != *Game::pLocalPlayer) {
+				int32_t playerId = player->fields.PlayerId;
+
+				auto it = State.Rpc101OverloadTimestamps.find(playerId);
+				if (it == State.Rpc101OverloadTimestamps.end() || duration_cast<seconds>(now - it->second).count() >= 3) {
+					State.Rpc101OverloadTimestamps[playerId] = now;
+
+					std::string name = RemoveHtmlTags(convert_from_string(GetPlayerOutfit(GetPlayerData(player))->fields.PlayerName));
+					std::string actionMessage = std::format("{} has exceeded the rate-limit of SickoChat!", name);
+
+					Toasts::AddToast("SickoChat Rate-Limit", actionMessage, ImVec4(1.f, 0.f, 0.f, 1.f));
+				}
+			}
+			return;
+		}
+
+		std::string playerName = SafelyReadString(reader);
+		std::string message = SafelyReadString(reader);
+		uint32_t colorId = MessageReader_ReadInt32(reader, NULL);
+
+		if (message.empty()) return;
+
+		NetworkedPlayerInfo* local = GetPlayerData(*Game::pLocalPlayer);
+		bool wasDead = false;
+
+		if (player != NULL && GetPlayerData(player)->fields.IsDead && local != NULL && !local->fields.IsDead) {
+			local->fields.IsDead = true;
+			wasDead = true;
+		}
+
+		State.IsProcessingSickoChat = true;
+		ChatController_AddChat(Game::HudManager.GetInstance()->fields.Chat, player, convert_to_string(message), false, NULL);
+		State.IsProcessingSickoChat = false;
+
+		if (wasDead) {
+			local->fields.IsDead = false;
+		}
+
+		STREAM_DEBUG("SickoChat RPC from " << playerName << " (RPC sent by " << ToString((Game::PlayerId)player->fields.PlayerId) << ")");
+	}
+
+	if (State.modUsers.find(playerId) != State.modUsers.end()) return;
+
+	switch (callId) {
+	case (uint8_t)420:
+	{
+		std::string version = SafelyReadString(reader);
+
+		std::string formattedVersion = "<#fb0>" + version + "</color>";
+		if (version.find("pr") != std::string::npos || version.find("rc") != std::string::npos) {
+			formattedVersion = "<#a700ff>" + version + "</color>";
+		}
+
+		if (State.modUsers.find(playerId) == State.modUsers.end() && MessageReader_get_BytesRemaining(reader, NULL) == 0) {
+			State.modUsers.insert({ playerId, { "<#ff006c>SickoMenu</color>", formattedVersion } });
+			STREAM_DEBUG("RPC Received for another SickoMenu user from " << ToString((Game::PlayerId)playerId));
+			if (State.SMAC_CheckSicko) SMAC_OnCheatDetected(player, "SickoMenu User");
+		}
+	}
+	break;
+	/*case (uint8_t)42069:
+	{
+		if (State.modUsers.find(playerId) == State.modUsers.end()) {
+			State.modUsers.insert({ playerId, { "<#f55>AmongUsMenu</color>", "" } });
+			STREAM_DEBUG("RPC Received for an AmongUsMenu user from " << ToString((Game::PlayerId)playerId) << " (RPC sent by " << ToString((Game::PlayerId)player->fields.PlayerId) << ")");
+			if (State.SMAC_CheckOtherCheats) SMAC_OnCheatDetected(player, "AmongUsMenu User");
+		}
+	}
+	break;*/ // discontinued
+	case (uint8_t)151:
+	case (uint8_t)152:
+	{
+		if (State.modUsers.find(playerId) == State.modUsers.end()) {
+			State.modUsers.insert({ playerId, { "<#5f5>BetterAmongUs</color>", "" } });
+			STREAM_DEBUG("RPC Received for a BetterAmongUs user from " << ToString((Game::PlayerId)playerId) << " (RPC sent by " << ToString((Game::PlayerId)player->fields.PlayerId) << ")");
+		}
+	}
+	break;
+	/*case (uint8_t)250:
+	{
+		if (State.modUsers.find(playerId) == State.modUsers.end()) {
+			State.modUsers.insert({ playerId, { "<#f00>KillNetwork</color>", "" } });
+			STREAM_DEBUG("RPC Received for a KillNetwork user from " << ToString((Game::PlayerId)playerId) << " (RPC sent by " << ToString((Game::PlayerId)player->fields.PlayerId) << ")");
+			if (State.SMAC_CheckOtherCheats) SMAC_OnCheatDetected(player, "KillNetwork User");
+		}
+	}
+	break;*/ // discontinued
+	case (uint8_t)176:
+	{
+		if (State.modUsers.find(playerId) == State.modUsers.end()) {
+			State.modUsers.insert({ playerId, { "<#ADD8E6>HostGuard</color>", "" } });
+			STREAM_DEBUG("RPC Received for a HostGuard user from " << ToString((Game::PlayerId)playerId) << " (RPC sent by " << ToString((Game::PlayerId)player->fields.PlayerId) << ")");
+			// Developer: Loot
+		}
+	}
+	break;
+	case (uint8_t)121:
+	{
+		if (State.modUsers.find(playerId) == State.modUsers.end()) {
+			State.modUsers.insert({ playerId, { "<#ad2225>ChocooMenu</color>", "" } });
+			STREAM_DEBUG("RPC Received for a ChocooMenu user from " << ToString((Game::PlayerId)playerId) << " (RPC sent by " << ToString((Game::PlayerId)player->fields.PlayerId) << ")");
+			if (State.SMAC_CheckOtherCheats) SMAC_OnCheatDetected(player, "ChocooMenu User");
+			// Developer: unnikuttan1753
+		}
+	}
+	break;
+	case (uint8_t)201:
+	case (uint8_t)202:
+	{
+		std::string aiSlopVersion = "";
+
+		if (callId == 202) {
+			SafelyReadString(reader); // handle signature
+			MessageReader_ReadByte(reader, NULL); // handle player ID
+			aiSlopVersion = "<#7c0>v" + SafelyReadString(reader) + "</color>";
+		}
+
+		if (State.modUsers.find(playerId) == State.modUsers.end()) {
+			State.modUsers.insert({ playerId, { "<#7c0>SlopMenuCrew</color>", aiSlopVersion } });
+			STREAM_DEBUG("RPC Received for a SlopMenuCrew user from " << ToString((Game::PlayerId)playerId) << " (RPC sent by " << ToString((Game::PlayerId)player->fields.PlayerId) << ")");
+			if (State.SMAC_CheckOtherCheats) SMAC_OnCheatDetected(player, "SlopMenuCrew User");
+			else if (IsHost()) InnerNetClient_KickPlayer((InnerNetClient*)(*Game::pAmongUsClient), player->fields._.OwnerId, true, NULL);
+			// :trolley_irl:
+		}
+	}
+	break;
+	case (uint8_t)103:
+	{
+		if (State.modUsers.find(playerId) == State.modUsers.end()) {
+			State.modUsers.insert({ playerId, { "<#030303>Unknown</color>", "" } });
+			STREAM_DEBUG("RPC Received for an <Unknown mod-client> user from " << ToString((Game::PlayerId)playerId) << " (RPC sent by " << ToString((Game::PlayerId)player->fields.PlayerId) << ")");
+			// Developer: Askinchik
+		}
+	}
+	break;
+	break;
+	}
+}
+
+void SMAC_HandleRpc(PlayerControl* player, uint8_t callId, MessageReader* reader) {
+	if (!State.Enable_SMAC || player == *Game::pLocalPlayer) return;
+	auto pData = GetPlayerData(player);
+	switch (callId) {
+	case (uint8_t)RpcCalls__Enum::CheckName:
+	case (uint8_t)RpcCalls__Enum::SetName: {
+		if ((IsHost() || !State.SafeMode) && (State.ForceNameForEveryone || State.CustomNameForEveryone || (State.Cycler && State.CycleName && State.CycleForEveryone)))
+			break;
+		if (State.SMAC_CheckBadNames && IsInGame()) {
+			auto name = MessageReader_ReadString(reader, NULL);
+			std::string nameStr = convert_from_string(name);
+			if (nameStr == "") return; //prevent false flags
+			if (MessageReader_get_BytesRemaining(reader, NULL) > 0 || MessageReader_ReadBoolean(reader, NULL)) return;
+			if (nameStr != RemoveHtmlTags(nameStr)) return;
+			if (!IsNameValid(nameStr)) return;
+			SMAC_OnCheatDetected(player, "Abnormal Name");
+		}
+		return;
+		break;
+	}
+	case (uint8_t)RpcCalls__Enum::CheckColor:
+		if ((IsHost() || !State.SafeMode) && (State.ForceColorForEveryone || (State.Cycler && State.RandomColor && State.CycleForEveryone)))
+			break;
+		if (State.SMAC_CheckColor && IsInGame()) {
+			SMAC_OnCheatDetected(player, "Abnormal Change Color");
+			return;
+		}
+		break;
+	case (uint8_t)RpcCalls__Enum::SetHat_Deprecated:
+	case (uint8_t)RpcCalls__Enum::SetHatStr:
+	case (uint8_t)RpcCalls__Enum::SetVisor_Deprecated:
+	case (uint8_t)RpcCalls__Enum::SetVisorStr:
+	case (uint8_t)RpcCalls__Enum::SetSkin_Deprecated:
+	case (uint8_t)RpcCalls__Enum::SetSkinStr:
+	case (uint8_t)RpcCalls__Enum::SetPet_Deprecated:
+	case (uint8_t)RpcCalls__Enum::SetPetStr:
+	case (uint8_t)RpcCalls__Enum::SetNamePlate_Deprecated:
+	case (uint8_t)RpcCalls__Enum::SetNamePlateStr:
+		if (!State.SafeMode) break;
+		if (State.SMAC_CheckCosmetics && IsInGame()) {
+			SMAC_OnCheatDetected(player, "Abnormal Change Cosmetics");
+			return;
+		}
+		break;
+	case (uint8_t)RpcCalls__Enum::SendChatNote:
+		if (State.SMAC_CheckChatNote && (IsInLobby() || !State.InMeeting)) {
+			SMAC_OnCheatDetected(player, "Abnormal Chat Note");
+			return;
+		}
+		break;
+	case (uint8_t)RpcCalls__Enum::SetScanner: {
+		bool scanning = MessageReader_ReadBoolean(reader, NULL);
+		if (State.SMAC_CheckScanner && (IsInLobby() || PlayerIsImpostor(pData) ||
+			((State.mapType == Settings::MapType::Airship || State.mapType == Settings::MapType::Fungle) && scanning))) {
+			SMAC_OnCheatDetected(player, "Abnormal MedBay Scan");
+			return;
+		}
+
+		if (State.SMAC_CheckScanner && scanning && IsInGame()) {
+			bool hasScanTask = false;
+			for (auto task : GetNormalPlayerTasks(player))
+				if (task->fields._.TaskType == TaskTypes__Enum::SubmitScan) { hasScanTask = true; break; }
+			if (!hasScanTask) {
+				SMAC_OnCheatDetected(player, "Abnormal MedBay Scan (No Scan Task)");
+				return;
+			}
+		}
+		break;
+	}
+	case (uint8_t)RpcCalls__Enum::PlayAnimation: {
+		if (State.SMAC_CheckAnimation && IsInGame()) {
+			if (PlayerIsImpostor(pData)) {
+				SMAC_OnCheatDetected(player, "Abnormal Animation (Impostor Has No Visual Tasks)");
+				return;
+			}
+			uint8_t animType = MessageReader_ReadByte(reader, NULL);
+			if (animType == (uint8_t)TaskTypes__Enum::PrimeShields ||
+				animType == (uint8_t)TaskTypes__Enum::ClearAsteroids ||
+				animType == (uint8_t)TaskTypes__Enum::EmptyGarbage) {
+				bool hasTask = false;
+				for (auto task : GetNormalPlayerTasks(player))
+					if ((uint8_t)task->fields._.TaskType == animType) { hasTask = true; break; }
+				if (!hasTask) {
+					SMAC_OnCheatDetected(player, "Abnormal Animation (No Matching Visual Task)");
+					return;
+				}
+			}
+		}
+		break;
+	}
+	case (uint8_t)RpcCalls__Enum::SetTasks:
+		if (State.SMAC_CheckTasks && (IsInLobby() || State.InMeeting)) {
+			SMAC_OnCheatDetected(player, "Abnormal Set Tasks");
+			return;
+		}
+		break;
+	case (uint8_t)RpcCalls__Enum::SendChat: {
+		break;
+	}
+	/*case (uint8_t)RpcCalls__Enum::StartMeeting: {
+		if (State.SMAC_CheckMeeting && IsInLobby()) {
+			SMAC_OnCheatDetected(player, "Abnormal Meeting");
+			return;
+		}
+		break;
+	}*/
+	/*case (uint8_t)RpcCalls__Enum::ReportDeadBody: {
+		auto bodyPlayer = GetPlayerDataById(MessageReader_ReadByte(reader, NULL));
+		if (State.SMAC_CheckReport) {
+			if (IsInLobby() || !State.GameLoaded) {
+				SMAC_OnCheatDetected(player, "Abnormal Report Body");
+				return;
+			}
+			if (IsInGame() && (bodyPlayer != NULL && !bodyPlayer->fields.IsDead)) {
+				SMAC_OnCheatDetected(player, "Abnormal Report Body");
+				return;
+			}
+		}
+		break;
+	}*/ //causes host's body to be reported
+	/*case (uint8_t)RpcCalls__Enum::CheckMurder:
+	case (uint8_t)RpcCalls__Enum::MurderPlayer:
+	check PlayerControl.cpp*/
+	case (uint8_t)RpcCalls__Enum::Shapeshift:
+	case (uint8_t)RpcCalls__Enum::CheckShapeshift:
+	case (uint8_t)RpcCalls__Enum::RejectShapeshift: {
+		if (State.SMAC_CheckShapeshift && (IsInLobby() || GetPlayerData(player)->fields.RoleType != RoleTypes__Enum::Shapeshifter)) {
+			SMAC_OnCheatDetected(player, "Abnormal Shapeshift");
+			return;
+		}
+		break;
+	}
+	case (uint8_t)RpcCalls__Enum::StartVanish:
+	case (uint8_t)RpcCalls__Enum::StartAppear:
+	case (uint8_t)RpcCalls__Enum::CheckVanish:
+	case (uint8_t)RpcCalls__Enum::CheckAppear: {
+		if (State.SMAC_CheckVanish && (IsInLobby() || GetPlayerData(player)->fields.RoleType != RoleTypes__Enum::Phantom)) {
+			SMAC_OnCheatDetected(player, "Abnormal Vanish/Appear");
+			return;
+		}
+		break;
+	}
+	case (uint8_t)RpcCalls__Enum::SetLevel: {
+		/*uint32_t level = MessageReader_ReadUInt32(reader, NULL);
+		if (State.SMAC_CheckLevel && (IsInGame() || level >= (uint32_t)State.SMAC_HighLevel)) {
+			SMAC_OnCheatDetected(player, "Abnormal Level");
+			return;
+		}*/
+		break;
+	}
+	case (uint8_t)RpcCalls__Enum::EnterVent: {
+		if (State.SMAC_CheckVent && (IsInLobby() || pData->fields.IsDead || !(PlayerIsImpostor(pData) || pData->fields.RoleType == RoleTypes__Enum::Engineer))) {
+			SMAC_OnCheatDetected(player, "Abnormal Venting");
+			return;
+		}
+		break;
+	}
+	case (uint8_t)RpcCalls__Enum::CompleteTask: {
+		if (State.SMAC_CheckTaskCompletion && IsInGame()) {
+			if (PlayerIsImpostor(pData)) {
+				SMAC_OnCheatDetected(player, "Abnormal Task Completion (Impostor Has No Tasks)");
+				return;
+			}
+			uint8_t playerId = player->fields.PlayerId;
+			auto now = std::chrono::steady_clock::now();
+			auto it = State.lastTaskCompletionTime.find(playerId);
+			if (it != State.lastTaskCompletionTime.end()) {
+				float elapsedTime = std::chrono::duration<float>(now - it->second).count();
+				if (elapsedTime < State.TASK_DETECTION_WINDOW) {
+					State.taskCompletionCounter[playerId]++;
+					if (State.taskCompletionCounter[playerId] > State.MAX_TASK_COMPLETIONS) {
+						SMAC_OnCheatDetected(player, "Abnormal Task Completion");
+						return;
+					}
+				} else {
+					State.taskCompletionCounter[playerId] = 1;
+				}
+			} else {
+				State.taskCompletionCounter[playerId] = 1;
+			}
+			State.lastTaskCompletionTime[playerId] = now;
+		}
+		break;
+	}
+	}
+}
+
+bool SMAC_HandleUpdateSystem(PlayerControl* player, SystemTypes__Enum sysType, uint8_t reader) {
+	return false;
+}
