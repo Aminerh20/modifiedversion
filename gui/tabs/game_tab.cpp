@@ -51,7 +51,6 @@ namespace GameTab {
     }
 
     void Render() {
-        PlayersTab::TickProtectionLoop();
         ImGui::SameLine(100 * State.dpiScale);
         ImGui::BeginChild("###GameButtons", ImVec2(500 * State.dpiScale, 0), true, ImGuiWindowFlags_NoBackground);
         if (TabGroup("General", openGeneral)) {

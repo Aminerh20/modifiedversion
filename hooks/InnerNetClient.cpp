@@ -55,6 +55,7 @@ const ptrdiff_t GetRoleCount(RoleType role, bool excludeSelf = false)
 static void onGameEnd() {
     try {
         LOG_DEBUG("Reset All");
+        PlayersTab::ClearProtectionTargets();
         Replay::Reset();
         State.liveReplayEvents.clear();
         State.modUsers.clear();
@@ -154,6 +155,8 @@ void dInnerNetClient_Update(InnerNetClient* __this, MethodInfo* method) {
         }
 
         if (!State.PanicMode) {
+            PlayersTab::TickProtectionLoop();
+
             if (IsHost() && !State.Mod_PendingRulesMessages.empty()) {
                 State.Mod_PendingRulesDelay -= Time_get_deltaTime(NULL);
                 if (State.Mod_PendingRulesDelay <= 0.f) {
@@ -834,8 +837,6 @@ void dInnerNetClient_Update(InnerNetClient* __this, MethodInfo* method) {
                         break;
                     }
                     int hqOffset = (int)(State.mapType == Settings::MapType::Hq);
-
-                    PlayersTab::TickProtectionLoop();
 
                     static float ventTpDelay = 0.f;
                     if (ventTpDelay <= 0.f) {

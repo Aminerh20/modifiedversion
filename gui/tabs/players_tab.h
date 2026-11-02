@@ -33,6 +33,8 @@ namespace PlayersTab {
 	};
 	void Render();
 	void TickProtectionLoop();
+	void StopProtectionLoop();
+	void ClearProtectionTargets();
 	void RenderProtectionControls();
 	void OpenSubGroup(const std::string& name);
 }

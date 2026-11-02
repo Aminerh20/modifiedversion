@@ -18,6 +18,7 @@ namespace PlayersTab {
     static bool protectionCrewmatesOnly = false;
     static int protectionIntervalMs = 50;
     static std::vector<Game::PlayerId> protectionTargets = {};
+    static size_t protectionTargetIndex = 0;
     static std::chrono::steady_clock::time_point lastProtectionTime = std::chrono::steady_clock::now();
 
     enum Groups {
@@ -135,9 +136,14 @@ namespace PlayersTab {
         }
     }
 
-    static void StopProtectionLoop() {
+    void StopProtectionLoop() {
         protectionToggleUiEnabled = false;
         protectionCrewmatesOnly = false;
+        protectionTargetIndex = 0;
+    }
+
+    void ClearProtectionTargets() {
+        StopProtectionLoop();
         protectionTargets.clear();
     }
 
@@ -147,15 +153,16 @@ namespace PlayersTab {
             StopProtectionLoop();
             return;
         }
+                if (*Game::pLocalPlayer == nullptr) return;
 
         auto now = std::chrono::steady_clock::now();
         long long elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastProtectionTime).count();
-        if (elapsed < protectionIntervalMs) return;
-        int shots = (int)(std::min)(elapsed / protectionIntervalMs, 10LL); // catch up if frames are slower than the interval
+        const int intervalMs = (std::max)(protectionIntervalMs, 1);
+        if (elapsed < intervalMs) return;
         lastProtectionTime = now;
 
         auto localData = GetPlayerData(*Game::pLocalPlayer);
-        if (!localData) return;
+                if (localData == nullptr) return;
         app::RoleBehaviour* playerRole = localData->fields.Role;
         app::RoleTypes__Enum role = playerRole != nullptr ? playerRole->fields.Role : app::RoleTypes__Enum::Crewmate;
 
@@ -169,35 +176,40 @@ namespace PlayersTab {
         std::queue<RPCInterface*>* queue = IsInGame() ? &State.rpcQueue : &State.lobbyRpcQueue;
 
         if (isGuardianAngel) {
-            // legit path: one target, respects the ability cooldown
             auto* ga = (app::GuardianAngelRole*)playerRole;
             if (ga->fields.cooldownSecondsRemaining > 0) return;
-            auto pc = GetPlayerControlById(protectionTargets[0]);
-            if (pc == NULL) return;
-            if (protectionCrewmatesOnly) {
-                auto targetData = GetPlayerData(pc);
-                if (targetData == nullptr || targetData->fields.Role == nullptr || PlayerIsImpostor(targetData)) return;
-            }
-            auto sel = PlayerSelection(pc);
-            if (!sel.has_value()) return;
-            queue->push(new CmdCheckProtect(*Game::pLocalPlayer, sel));
-            return;
-        }
-
-        for (int i = 0; i < shots; i++) {
-            for (auto id : protectionTargets) {
-                auto pc = GetPlayerControlById(id);
-                if (pc == NULL) continue;
+            for (size_t attempts = 0; attempts < protectionTargets.size(); ++attempts) {
+                const size_t index = protectionTargetIndex % protectionTargets.size();
+                protectionTargetIndex = (index + 1) % protectionTargets.size();
+                auto pc = GetPlayerControlById(protectionTargets[index]);
+                if (pc == nullptr) continue;
                 auto targetData = GetPlayerData(pc);
                 if (targetData == nullptr) continue;
                 if (protectionCrewmatesOnly &&
                     (targetData->fields.Role == nullptr || PlayerIsImpostor(targetData))) continue;
                 auto sel = PlayerSelection(pc);
                 if (!sel.has_value()) continue;
-                auto outfit = GetPlayerOutfit(targetData);
-                if (outfit == NULL) continue;
-                queue->push(new RpcProtectPlayer(*Game::pLocalPlayer, sel, outfit->fields.ColorId));
+                queue->push(new CmdCheckProtect(*Game::pLocalPlayer, sel));
+                return;
             }
+            return;
+        }
+
+        for (size_t attempts = 0; attempts < protectionTargets.size(); ++attempts) {
+            const size_t index = protectionTargetIndex % protectionTargets.size();
+            protectionTargetIndex = (index + 1) % protectionTargets.size();
+            auto pc = GetPlayerControlById(protectionTargets[index]);
+            if (pc == nullptr) continue;
+            auto targetData = GetPlayerData(pc);
+            if (targetData == nullptr) continue;
+            if (protectionCrewmatesOnly &&
+                (targetData->fields.Role == nullptr || PlayerIsImpostor(targetData))) continue;
+            auto sel = PlayerSelection(pc);
+            if (!sel.has_value()) continue;
+            auto outfit = GetPlayerOutfit(targetData);
+            if (outfit == nullptr) continue;
+            queue->push(new RpcProtectPlayer(*Game::pLocalPlayer, sel, outfit->fields.ColorId));
+            return;
         }
     }
 
@@ -209,20 +221,73 @@ namespace PlayersTab {
                 }
                 else {
                     protectionCrewmatesOnly = crewmatesOnly;
-                    lastProtectionTime = std::chrono::steady_clock::now() - std::chrono::milliseconds(protectionIntervalMs);
+                    protectionTargetIndex = 0;
+                    lastProtectionTime = std::chrono::steady_clock::now() - std::chrono::milliseconds((std::max)(protectionIntervalMs, 1));
                 }
                 return;
             }
 
-            protectionTargets.clear();
-            for (auto playerId : State.selectedPlayers) protectionTargets.push_back(playerId);
+                        if (protectionTargets.empty()) {
+                for (auto playerId : State.selectedPlayers) protectionTargets.push_back(playerId);
+            }
             if (!protectionTargets.empty()) {
+                protectionTargetIndex = 0;
                 protectionCrewmatesOnly = crewmatesOnly;
                 protectionToggleUiEnabled = true;
-                lastProtectionTime = std::chrono::steady_clock::now() - std::chrono::milliseconds(protectionIntervalMs);
+                lastProtectionTime = std::chrono::steady_clock::now() - std::chrono::milliseconds((std::max)(protectionIntervalMs, 1));
             }
         };
 
+        auto allPlayers = GetAllPlayerControl();
+        protectionTargets.erase(
+            std::remove_if(protectionTargets.begin(), protectionTargets.end(), [&](Game::PlayerId playerId) {
+                auto player = GetPlayerControlById(playerId);
+                auto playerData = player != nullptr ? GetPlayerData(player) : nullptr;
+                return playerData == nullptr || playerData->fields.Disconnected;
+            }),
+            protectionTargets.end());
+
+        std::string targetPreview = std::format("{} selected", protectionTargets.size());
+        if (ImGui::BeginCombo("Protection targets", targetPreview.c_str())) {
+            if (ImGui::SmallButton("Select all")) {
+                protectionTargets.clear();
+                for (auto player : allPlayers) {
+                    if (player == nullptr) continue;
+                    auto playerData = GetPlayerData(player);
+                    if (playerData == nullptr || playerData->fields.Disconnected) continue;
+                    protectionTargets.push_back(playerData->fields.PlayerId);
+                }
+                protectionTargetIndex = 0;
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Clear")) {
+                protectionTargets.clear();
+                protectionTargetIndex = 0;
+            }
+
+            for (auto player : allPlayers) {
+                if (player == nullptr) continue;
+                auto playerData = GetPlayerData(player);
+                if (playerData == nullptr || playerData->fields.Disconnected) continue;
+
+                const auto playerId = playerData->fields.PlayerId;
+                const bool selected = std::find(protectionTargets.begin(), protectionTargets.end(), playerId) != protectionTargets.end();
+                std::string playerName = convert_from_string(NetworkedPlayerInfo_get_PlayerName(playerData, nullptr));
+                ImGui::PushID(static_cast<int>(playerId));
+                if (ImGui::Selectable(playerName.c_str(), selected, ImGuiSelectableFlags_DontClosePopups)) {
+                    if (selected) {
+                        protectionTargets.erase(std::remove(protectionTargets.begin(), protectionTargets.end(), playerId), protectionTargets.end());
+                    }
+                    else {
+                        protectionTargets.push_back(playerId);
+                    }
+                    protectionTargetIndex = 0;
+                }
+                ImGui::PopID();
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SameLine();
         if (AnimatedButton("Toggle Protection")) toggleProtection(false);
         ImGui::SameLine();
         if (AnimatedButton("Toggle Crew Protection")) toggleProtection(true);
@@ -238,7 +303,6 @@ namespace PlayersTab {
 
     void Render() {
         g_FrameCounter++;
-        TickProtectionLoop();
 
         if ((IsInGame() || IsInLobby())) {
             ColorMapping FAKEROLE_NAMES_COLOR[] = {
