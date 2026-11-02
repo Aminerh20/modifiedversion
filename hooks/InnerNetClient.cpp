@@ -13,7 +13,7 @@
 #include "console.hpp"
 #include <chrono>
 #include "achievements.hpp"
-
+#include "players_tab.h"
 using namespace std::string_view_literals;
 
 static bool autoStartedGame = false;
@@ -834,6 +834,8 @@ void dInnerNetClient_Update(InnerNetClient* __this, MethodInfo* method) {
                         break;
                     }
                     int hqOffset = (int)(State.mapType == Settings::MapType::Hq);
+
+                    PlayersTab::TickProtectionLoop();
 
                     static float ventTpDelay = 0.f;
                     if (ventTpDelay <= 0.f) {
