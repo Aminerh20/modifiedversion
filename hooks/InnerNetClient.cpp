@@ -13,7 +13,7 @@
 #include "console.hpp"
 #include <chrono>
 #include "achievements.hpp"
-#include "players_tab.h"
+#include "../gui/tabs/players_tab.h"
 using namespace std::string_view_literals;
 
 static bool autoStartedGame = false;
