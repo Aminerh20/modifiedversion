@@ -153,16 +153,22 @@ namespace PlayersTab {
             StopProtectionLoop();
             return;
         }
-                if (*Game::pLocalPlayer == nullptr) return;
+        if (*Game::pLocalPlayer == nullptr) return;
 
         auto now = std::chrono::steady_clock::now();
         long long elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastProtectionTime).count();
-        const int intervalMs = (std::max)(protectionIntervalMs, 1);
+        const int targetCount = static_cast<int>(protectionTargets.size());
+        const int targetIntervalMs = (std::max)(protectionIntervalMs, 1);
+        const int dispatchIntervalMs = (std::max)(
+            1, targetIntervalMs / targetCount + (targetIntervalMs % targetCount != 0));
+        const int fps = GetFps();
+        const int frameIntervalMs = fps > 0 ? (std::max)(1000 / fps, 1) : 1;
+        const int intervalMs = (std::max)(dispatchIntervalMs, frameIntervalMs);
         if (elapsed < intervalMs) return;
         lastProtectionTime = now;
 
         auto localData = GetPlayerData(*Game::pLocalPlayer);
-                if (localData == nullptr) return;
+        if (localData == nullptr) return;
         app::RoleBehaviour* playerRole = localData->fields.Role;
         app::RoleTypes__Enum role = playerRole != nullptr ? playerRole->fields.Role : app::RoleTypes__Enum::Crewmate;
 
@@ -248,6 +254,7 @@ namespace PlayersTab {
             protectionTargets.end());
 
         std::string targetPreview = std::format("{} selected", protectionTargets.size());
+        ImGui::SetNextItemWidth(-1.0f);
         if (ImGui::BeginCombo("Protection targets", targetPreview.c_str())) {
             if (ImGui::SmallButton("Select all")) {
                 protectionTargets.clear();
@@ -287,15 +294,12 @@ namespace PlayersTab {
             }
             ImGui::EndCombo();
         }
-        ImGui::SameLine();
         if (AnimatedButton("Toggle Protection")) toggleProtection(false);
-        ImGui::SameLine();
         if (AnimatedButton("Toggle Crew Protection")) toggleProtection(true);
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(60 * State.dpiScale);
+        ImGui::SetNextItemWidth(120 * State.dpiScale);
         ImGui::InputInt("##protectionIntervalMs", &protectionIntervalMs, 1, 10);
         ImGui::SameLine();
-        ImGui::Text("ms%s", protectionToggleUiEnabled
+        ImGui::Text("ms/player%s", protectionToggleUiEnabled
             ? (protectionCrewmatesOnly ? " (Crew Only On)" : " (On)")
             : " (Off)");
         if (protectionIntervalMs < 1) protectionIntervalMs = 1;
