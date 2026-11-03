@@ -1,4 +1,5 @@
 #include "pch-il2cpp.h"
+#include "DrainXp.h"
 #include "_hooks.h"
 #include "_rpc.h"
 #include "state.hpp"
