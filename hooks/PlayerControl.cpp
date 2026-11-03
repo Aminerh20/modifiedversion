@@ -8,6 +8,7 @@
 #include "_rpc.h"
 #include "replay.hpp"
 #include "profiler.h"
+#include "../improvements/DrainXp.h"
 #include <iostream>
 #include <optional>
 #include "logger.h"
@@ -941,6 +942,10 @@ void dPlayerControl_OnGameStart(PlayerControl* __this, MethodInfo* method) {
     if (State.ShowHookLogs) Log.HookDebug("Hook dPlayerControl_OnGameStart executed", false);
     try {
         State.GameLoaded = true;
+
+        // Drain XP: the loading bar is finally done - act on it now if a drain
+        // run is active with a round pending.
+        DrainXp::TickGameLoaded();
 
         if (State.Overflow && __this == *Game::pLocalPlayer &&
             convert_from_string(GetPlayerOutfit(GetPlayerData(__this))->fields.NamePlateId) == "missing") {

@@ -6,6 +6,7 @@
 #include "state.hpp"
 #include "logger.h"
 #include "players_tab.h"
+#include "../../improvements/DrainXp.h"
 
 static std::string strToLower(std::string str) {
     std::string new_str = "";
@@ -207,6 +208,48 @@ namespace GameTab {
                 }
                 State.NoClip = true;
                 ShowHudNotification("Allowed everyone to NoClip!");
+            }
+
+            // Drain XP - host-only automation that force-starts the game and ends it right
+            // after the loading bar, until every lobby player's accumulated XP is drained.
+            if (IsHost() && IsInLobby()) {
+                ImGui::Dummy(ImVec2(7, 7) * State.dpiScale);
+                ImGui::Separator();
+                ImGui::Dummy(ImVec2(7, 7) * State.dpiScale);
+
+                int drainStatus = DrainXp::GetRunningStatus();
+
+                if (drainStatus == 0) {
+                    if (AnimatedButton("Drain XP")) {
+                        DrainXp::Start();
+                    }
+                }
+                else {
+                    if (ColoredButton(ImVec4(1.f, 0.f, 0.f, 1.f), drainStatus == 2 ? "Drain XP [Waiting 30s Rejoin]" : "Drain XP [Running...]")) {
+                        DrainXp::Stop();
+                    }
+                }
+                ImGui::SameLine();
+                if (ToggleButton("Chat Messages", &State.DrainXpChat)) {
+                    State.Save();
+                }
+
+                ImGui::Dummy(ImVec2(3, 3) * State.dpiScale);
+                if (ToggleButton("End Via Meeting", &State.DrainXpEndViaMeeting)) {
+                    State.Save();
+                }
+                ImGui::SameLine();
+                ImGui::TextDisabled("?");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Instead of force-ending the game, call a meeting right after loading. Slower, but looks legit to onlookers.");
+
+                if (DrainXp::GetLevelUpObserved()) {
+                    ImGui::TextColored(ImVec4(0.f, 1.f, 0.5f, 1.f), "At least one player leveled up during this run.");
+                }
+
+                if (drainStatus == 0) {
+                    ImGui::TextDisabled("Host only - uses level-ups as an XP proxy; starts a round,\nends after loading, and announces detected level-ups.");
+                }
             }
             /*if (IsHost() && (IsInGame() || IsInLobby()) && AnimatedButton("Spawn Dummy")) {
                 auto outfit = GetPlayerOutfit(GetPlayerData(*Game::pLocalPlayer));

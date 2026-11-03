@@ -474,6 +474,9 @@ void Settings::Load() {
         JSON_TRYGET("GameModeDuration", this->GameModeDuration);
         this->GameModeDuration = std::clamp(this->GameModeDuration, 100, 1000);
 
+        JSON_TRYGET("DrainXpEndViaMeeting", this->DrainXpEndViaMeeting);
+        JSON_TRYGET("DrainXpChat", this->DrainXpChat);
+
         JSON_TRYGET("Enable_SMAC", this->Enable_SMAC);
         JSON_TRYGET("SMAC_Punishment", this->SMAC_Punishment);
         JSON_TRYGET("SMAC_HostPunishment", this->SMAC_HostPunishment);
@@ -1186,6 +1189,9 @@ void Settings::Save() {
                 { "StartCountdown", this->StartCountdown },
                 { "UseGameModeDuration", this->UseGameModeDuration },
                 { "GameModeDuration", this->GameModeDuration },
+
+                { "DrainXpEndViaMeeting", this->DrainXpEndViaMeeting },
+                { "DrainXpChat", this->DrainXpChat },
 
                 { "Enable_SMAC", this->Enable_SMAC },
                 { "SMAC_Punishment", this->SMAC_Punishment },

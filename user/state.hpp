@@ -929,6 +929,10 @@ public:
     std::unordered_set<int> DisabledTaskTypes;
     std::set<int> DisabledSabotageTypes;
 
+    // Drain XP [Dependencies]
+    bool DrainXpEndViaMeeting = false;
+    bool DrainXpChat = true;
+
     /*int BanDays = 0;
     int BanHours = 0;
     int BanMinutes = 0;

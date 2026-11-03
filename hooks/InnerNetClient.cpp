@@ -14,10 +14,16 @@
 #include <chrono>
 #include "achievements.hpp"
 #include "../gui/tabs/players_tab.h"
+#include "../improvements/DrainXp.h"
 using namespace std::string_view_literals;
 
 static bool autoStartedGame = false;
 extern bool editingAutoStartPlayerCount;
+
+// Drain XP: while a drain run is in flight, the host suppresses ending the
+// game on its own (and suppresses AutoStart/Auto-Kick) so the controlled
+// "start -> load -> end" loop stays the only one driving the lobby.
+static bool drainXpInFlight = false;
 
 static std::string strToLower(std::string str) {
     std::string new_str = "";
@@ -101,6 +107,9 @@ static void onGameEnd() {
         State.ChatSpamMode = 0;
         State.HasSpawnedIn = false;
 
+        // Drain XP: a round just ended; re-arm once the run flips status.
+        drainXpInFlight = DrainXp::GetRunningStatus() != 0;
+
         State.VoteOffPlayerId = Game::HasNotVoted;
 
         if (State.PanicMode && State.TempPanicMode) {
@@ -149,6 +158,10 @@ void RemoveExcessDisabledTasks(std::vector<TaskTypes__Enum> taskList) {
 void dInnerNetClient_Update(InnerNetClient* __this, MethodInfo* method) {
     if (State.ShowHookLogs) Log.HookDebug("Hook dInnerNetClient_Update executed", false);
     try {
+        // Tick outside the lobby too, so loss of host authority cancels the run.
+        DrainXp::Tick();
+        drainXpInFlight = DrainXp::GetRunningStatus() != 0;
+
         if (State.unlockAllAchievements) {
             Achievements::UnlockAll();
             State.unlockAllAchievements = false;
@@ -353,6 +366,7 @@ void dInnerNetClient_Update(InnerNetClient* __this, MethodInfo* method) {
                     rpc->Process();
                     delete rpc;
                 }
+
             }
 
             static int rpcDelay = 0;
@@ -770,7 +784,7 @@ void dInnerNetClient_Update(InnerNetClient* __this, MethodInfo* method) {
                     State.VoteImmunePlayers.clear();
                 }
                 
-                if (IsHost() && IsInLobby() && State.AutoStartGame && (600 - State.LobbyTimer) >= State.AutoStartTimer && !autoStartedGame) {
+                if (IsHost() && IsInLobby() && State.AutoStartGame && (600 - State.LobbyTimer) >= State.AutoStartTimer && !autoStartedGame && !drainXpInFlight) {
                     autoStartedGame = true;
                     InnerNetClient_SendStartGame(__this, NULL);
                 }
@@ -1989,6 +2003,7 @@ void dAmongUsClient_OnGameEnd(AmongUsClient* __this, EndGameResult* endGameResul
 void dInnerNetClient_DisconnectInternal(InnerNetClient* __this, DisconnectReasons__Enum reason, String* stringReason, MethodInfo* method) {
     if (State.ShowHookLogs) Log.HookDebug("Hook dInnerNetClient_DisconnectInternal executed", false);
     try {
+        DrainXp::StopForHostLeaving();
         // IsInGame() || IsInLobby()
         if (__this->fields.GameState == InnerNetClient_GameStates__Enum::Started
             || __this->fields.GameState == InnerNetClient_GameStates__Enum::Joined
@@ -2012,6 +2027,7 @@ void dInnerNetClient_EnqueueDisconnect(InnerNetClient* __this, DisconnectReasons
         if (reason == DisconnectReasons__Enum::Error &&
             (reasonStr == "Timeout while waiting for player ID assignment" || reasonStr == "Timeout while waiting for player data containers"))
             return;
+        DrainXp::StopForHostLeaving();
         State.FollowerCam = nullptr;
         onGameEnd(); //removed antiban cuz it glitches the game
     }
@@ -2023,6 +2039,18 @@ void dInnerNetClient_EnqueueDisconnect(InnerNetClient* __this, DisconnectReasons
 
 void dGameManager_RpcEndGame(GameManager* __this, GameOverReason__Enum endReason, bool showAd, MethodInfo* method) {
     if (State.ShowHookLogs) Log.HookDebug("Hook dGameManager_RpcEndGame executed", false);
+    if (!State.PanicMode && IsHost() && drainXpInFlight) {
+        // Drain XP is mid-flight. Only ends the drain itself triggered get
+        // through (the drain overrides NoGameEnd/GameMode so a user setting
+        // can't hang the loop); meeting mode lets the vote/end through too.
+        // Everything else is swallowed so the lobby can't die to a stray end
+        // while we are between rounds.
+        if (DrainXp::IsForcedEnd(endReason)) {
+            DrainXp::OnGameEnd();
+            GameManager_RpcEndGame(__this, endReason, showAd, method);
+        }
+        return;
+    }
     if (!State.PanicMode && IsHost() && (State.NoGameEnd || State.GameMode != 0))
         return;
     GameManager_RpcEndGame(__this, endReason, showAd, method);
