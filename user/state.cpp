@@ -473,6 +473,9 @@ void Settings::Load() {
         JSON_TRYGET("UseGameModeDuration", this->UseGameModeDuration);
         JSON_TRYGET("GameModeDuration", this->GameModeDuration);
         this->GameModeDuration = std::clamp(this->GameModeDuration, 1, 1000);
+        JSON_TRYGET("ForceEndAfterAutoStart", this->ForceEndAfterAutoStart);
+        JSON_TRYGET("ForceEndAfterStartSeconds", this->ForceEndAfterStartSeconds);
+        this->ForceEndAfterStartSeconds = std::clamp(this->ForceEndAfterStartSeconds, 1, 1000);
 
         JSON_TRYGET("DrainXpEndViaMeeting", this->DrainXpEndViaMeeting);
         JSON_TRYGET("DrainXpChat", this->DrainXpChat);
@@ -1189,6 +1192,8 @@ void Settings::Save() {
                 { "StartCountdown", this->StartCountdown },
                 { "UseGameModeDuration", this->UseGameModeDuration },
                 { "GameModeDuration", this->GameModeDuration },
+                { "ForceEndAfterAutoStart", this->ForceEndAfterAutoStart },
+                { "ForceEndAfterStartSeconds", this->ForceEndAfterStartSeconds },
 
                 { "DrainXpEndViaMeeting", this->DrainXpEndViaMeeting },
                 { "DrainXpChat", this->DrainXpChat },

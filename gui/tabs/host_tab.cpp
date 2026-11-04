@@ -483,6 +483,17 @@ namespace HostTab {
                             State.GameModeDuration = std::clamp(State.GameModeDuration, 1, 1000);
                         }
                     }
+
+                    if (ToggleButton("End Game After Auto Start", &State.ForceEndAfterAutoStart)) {
+                        State.Save();
+                    }
+
+                    if (State.ForceEndAfterAutoStart) {
+                        ImGui::SetNextItemWidth(100 * State.dpiScale);
+                        if (ImGui::InputInt("End Seconds", &State.ForceEndAfterStartSeconds)) {
+                            State.ForceEndAfterStartSeconds = std::clamp(State.ForceEndAfterStartSeconds, 1, 1000);
+                        }
+                    }
                 }
 
                 if (ToggleButton("Spectator Mode", &State.SpectatorMode))

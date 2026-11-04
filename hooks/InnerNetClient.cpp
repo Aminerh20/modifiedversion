@@ -96,6 +96,8 @@ static void onGameEnd() {
         State.SpeedrunTimer = 0.f;
         State.GameModeDurationTimer = 0.f;
         State.GameModeDurationOver = false;
+        State.ForceEndAfterStartTimer = 0.f;
+        State.ForceEndAfterStartTriggered = false;
         autoStartedGame = false;
         State.ChatFocused = false;
         State.MIG_ThemeChanged = true;
@@ -177,6 +179,17 @@ void dInnerNetClient_Update(InnerNetClient* __this, MethodInfo* method) {
         if (!State.PanicMode) {
             PlayersTab::TickProtectionLoop();
             PlayersTab::TickKillLoop();
+
+            // Force End After Auto Start: counts from the moment auto-start
+            // fired, and ends the round after the chosen delay, regardless of
+            // whether the game has finished loading.
+            if (IsHost() && State.ForceEndAfterAutoStart && State.ForceEndAfterStartTriggered) {
+                State.ForceEndAfterStartTimer += Time_get_deltaTime(NULL);
+                if (State.ForceEndAfterStartTimer >= (float)State.ForceEndAfterStartSeconds) {
+                    State.ForceEndAfterStartTriggered = false;
+                    GameManager_RpcEndGame(GameManager__TypeInfo->static_fields->_Instance_k__BackingField, GameOverReason__Enum::ImpostorDisconnect, false, NULL);
+                }
+            }
 
             if (IsHost() && !State.Mod_PendingRulesMessages.empty()) {
                 State.Mod_PendingRulesDelay -= Time_get_deltaTime(NULL);
@@ -795,6 +808,10 @@ void dInnerNetClient_Update(InnerNetClient* __this, MethodInfo* method) {
                 if (IsHost() && IsInLobby() && State.AutoStartGame && (600 - State.LobbyTimer) >= State.AutoStartTimer && !autoStartedGame && !drainXpInFlight) {
                     autoStartedGame = true;
                     InnerNetClient_SendStartGame(__this, NULL);
+                    if (State.ForceEndAfterAutoStart) {
+                        State.ForceEndAfterStartTriggered = true;
+                        State.ForceEndAfterStartTimer = 0.f;
+                    }
                 }
 
 

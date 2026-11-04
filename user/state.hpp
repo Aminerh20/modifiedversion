@@ -142,8 +142,12 @@ public:
     int GameMode = 0;
     bool UseGameModeDuration = false;
     int GameModeDuration = 240;
-    float GameModeDurationTimer = 0.f; 
-    bool GameModeDurationOver = false; 
+    float GameModeDurationTimer = 0.f;
+    bool GameModeDurationOver = false;
+    bool ForceEndAfterAutoStart = false;
+    int ForceEndAfterStartSeconds = 5;
+    float ForceEndAfterStartTimer = 0.f;
+    bool ForceEndAfterStartTriggered = false;
     bool NoGameEnd = false;
     bool ChatSpam = false;
     bool CrashChatSpam = false;
