@@ -2068,7 +2068,7 @@ void dInnerNetClient_EnqueueDisconnect(InnerNetClient* __this, DisconnectReasons
 // mid-start, the server's StartGame confirmation (tag 2) is swallowed so the
 // round never materializes; the end message (tag 8) is let through so OnGameEnd
 // still applies the XP grant, exactly as it does for a real round.
-bool dInnerNetClient_HandleMessage(InnerNetClient* __this, MessageReader* reader, MethodInfo* method) {
+bool dInnerNetClient_HandleMessage(InnerNetClient* __this, MessageReader* reader, bool amHost, MethodInfo* method) {
     if (State.ShowHookLogs) Log.HookDebug("Hook dInnerNetClient_HandleMessage executed", false);
     try {
         if (DrainXpV2::HandleMessage(__this, reader))
@@ -2077,7 +2077,7 @@ bool dInnerNetClient_HandleMessage(InnerNetClient* __this, MessageReader* reader
     catch (...) {
         LOG_ERROR("Exception occurred in InnerNetClient_HandleMessage (InnerNetClient)");
     }
-    return InnerNetClient_HandleMessage(__this, reader, method);
+    return InnerNetClient_HandleMessage(__this, reader, amHost, method);
 }
 
 void dGameManager_RpcEndGame(GameManager* __this, GameOverReason__Enum endReason, bool showAd, MethodInfo* method) {

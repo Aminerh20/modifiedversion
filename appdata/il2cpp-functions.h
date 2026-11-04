@@ -203,7 +203,7 @@ DO_APP_FUNC(void, InnerNetClient_Update, (InnerNetClient* __this, MethodInfo* me
 // Drain XP v2: the client's incoming-message dispatcher. Hooking it lets us
 // swallow the server's StartGame confirmation (tag 2) so the round never
 // materializes - start -> end -> rejoin with nothing drawn.
-DO_APP_FUNC(bool, InnerNetClient_HandleMessage, (InnerNetClient* __this, MessageReader* reader, MethodInfo* method), "Assembly-CSharp, System.Boolean InnerNet.InnerNetClient::HandleMessage(Hazel.MessageReader)");
+DO_APP_FUNC(bool, InnerNetClient_HandleMessage, (InnerNetClient* __this, MessageReader* reader, bool amHost, MethodInfo* method), "Assembly-CSharp, System.Boolean InnerNet.InnerNetClient::HandleMessage(Hazel.MessageReader, System.Boolean)");
 // Drain XP v2: the same rejoin the end screen's "Play Again" button uses -
 // flips GameState from Ended back to Joined. If this signature ever fails the
 // build, delete this line: the run degrades to loaded rounds and still works.
