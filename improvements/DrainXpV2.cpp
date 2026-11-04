@@ -113,12 +113,12 @@ namespace DrainXpV2 {
         try {
             if (Game::pGameData != nullptr && *Game::pGameData != nullptr)
                 return (int)il2cpp::List((*Game::pGameData)->fields.AllPlayers).size() <= 1;
-            auto* lobby = LobbyBehaviour__TypeInfo->static_fields->Instance;
-            return lobby != nullptr && lobby->fields.LastPlayerCount <= 1;
         }
         catch (...) {
-            return false;
         }
+        // No GameData (or it failed): cannot prove we are alone, so run a
+        // loaded round instead of risking a phantom round with other players.
+        return false;
     }
 
     // The lobby is there and usable for the next round: joined, and the scene
@@ -314,8 +314,8 @@ namespace DrainXpV2 {
             }
             if (s_readySince < 0.f) s_readySince = now;
 
-            if (client->fields._.GameId != s_lobby) {
-                s_lobby = client->fields._.GameId;
+            if (client->fields.GameId != s_lobby) {
+                s_lobby = client->fields.GameId;
                 s_roundsHere = 0;
             }
 
@@ -423,7 +423,7 @@ namespace DrainXpV2 {
         s_broken = false;
         s_fails = 0;
         s_readySince = -1.f;
-        s_lobby = client->fields._.GameId;
+        s_lobby = client->fields.GameId;
         s_roundsHere = 0;
         s_stageAt = Time_get_time(NULL);
 
