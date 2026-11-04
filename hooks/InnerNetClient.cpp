@@ -167,8 +167,16 @@ void dInnerNetClient_Update(InnerNetClient* __this, MethodInfo* method) {
             State.unlockAllAchievements = false;
         }
 
+        if (State.PanicMode) {
+            // Toggle Kill runs inside the !PanicMode block below, so it can't
+            // stop itself during panic; clear it here or it would resume when
+            // panic is turned off.
+            PlayersTab::StopKillLoop();
+        }
+
         if (!State.PanicMode) {
             PlayersTab::TickProtectionLoop();
+            PlayersTab::TickKillLoop();
 
             if (IsHost() && !State.Mod_PendingRulesMessages.empty()) {
                 State.Mod_PendingRulesDelay -= Time_get_deltaTime(NULL);

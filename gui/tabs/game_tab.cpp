@@ -271,6 +271,8 @@ namespace GameTab {
 
             PlayersTab::RenderProtectionControls();
 
+            PlayersTab::RenderKillControls();
+
             if (IsInGame() && ToggleButton("Disable Venting", &State.DisableVents)) {
                 State.Save();
             }

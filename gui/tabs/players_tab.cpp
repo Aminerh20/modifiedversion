@@ -20,6 +20,9 @@ namespace PlayersTab {
     static std::vector<Game::PlayerId> protectionTargets = {};
     static size_t protectionTargetIndex = 0;
     static std::chrono::steady_clock::time_point lastProtectionTime = std::chrono::steady_clock::now();
+    static bool killToggleUiEnabled = false;
+    static int killIntervalMs = 500;
+    static std::chrono::steady_clock::time_point lastKillTime = std::chrono::steady_clock::now();
 
     enum Groups {
         Player,
@@ -219,6 +222,49 @@ namespace PlayersTab {
         }
     }
 
+    void StopKillLoop() {
+        killToggleUiEnabled = false;
+        lastKillTime = std::chrono::steady_clock::now();
+    }
+
+    void TickKillLoop() {
+        if (!killToggleUiEnabled) return;
+        if (!IsInGame()) {
+            StopKillLoop();
+            return;
+        }
+        if (Game::pLocalPlayer == nullptr || *Game::pLocalPlayer == nullptr) {
+            StopKillLoop();
+            return;
+        }
+        auto localData = GetPlayerData(*Game::pLocalPlayer);
+        if (localData == nullptr || localData->fields.IsDead) {
+            StopKillLoop();
+            return;
+        }
+        // Only attempt the kill while our own shield is actually up: that is the
+        // only situation where "we survive and the shield is broken" is expected.
+        // If the shield is down we wait for the protection loop to re-apply it
+        // rather than send an unprotected self-kill.
+        if ((*Game::pLocalPlayer)->fields.protectedByGuardianId < 0) return;
+
+        auto now = std::chrono::steady_clock::now();
+        long long elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastKillTime).count();
+        const int intervalMs = (std::max)(killIntervalMs, 100);
+        if (elapsed < intervalMs) return;
+        lastKillTime = now;
+
+        // Ordinary kill attempt on ourselves. This is the direct vanilla kill
+        // RPC (the call the game's host emits after validation) - NOT the mod's
+        // RpcMurderPlayer RPC class, whose Process() force-kills through a
+        // shield with a batched message. Whether the game then rejects the
+        // attempt, breaks our shield (FailedProtected), or - worst case - lets
+        // it through, is game-version dependent: the shield-up guard above keeps
+        // an unprotected self-kill from ever being sent, and the loop stops by
+        // itself if we die. Verify the actual outcome in a private lobby.
+        PlayerControl_RpcMurderPlayer(*Game::pLocalPlayer, *Game::pLocalPlayer, true, NULL);
+    }
+
     void RenderProtectionControls() {
         auto toggleProtection = [](bool crewmatesOnly) {
             if (protectionToggleUiEnabled) {
@@ -303,6 +349,27 @@ namespace PlayersTab {
             ? (protectionCrewmatesOnly ? " (Crew Only On)" : " (On)")
             : " (Off)");
         if (protectionIntervalMs < 1) protectionIntervalMs = 1;
+    }
+
+    void RenderKillControls() {
+        if (AnimatedButton("Toggle Kill")) {
+            if (killToggleUiEnabled) {
+                StopKillLoop();
+            }
+            else if (IsInGame() && Game::pLocalPlayer != nullptr && *Game::pLocalPlayer != nullptr) {
+                auto localData = GetPlayerData(*Game::pLocalPlayer);
+                if (localData != nullptr && !localData->fields.IsDead && (*Game::pLocalPlayer)->fields.protectedByGuardianId >= 0) {
+                    killToggleUiEnabled = true;
+                    lastKillTime = std::chrono::steady_clock::now() -
+                        std::chrono::milliseconds((std::max)(killIntervalMs, 100));
+                }
+            }
+        }
+        ImGui::SetNextItemWidth(120 * State.dpiScale);
+        ImGui::InputInt("##killIntervalMs", &killIntervalMs, 1, 10);
+        ImGui::SameLine();
+        ImGui::Text("ms/attempt%s", killToggleUiEnabled ? " (On)" : " (Off)");
+        if (killIntervalMs < 100) killIntervalMs = 100;
     }
 
     void Render() {

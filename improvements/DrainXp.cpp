@@ -49,9 +49,11 @@ namespace DrainXp {
     static bool s_finalWindow = false;   // after the window: stop (not restart)
     static bool s_forcedEndPending = false; // the drain's own forced end is pending
     static bool s_meetingEndPending = false;
+    static bool s_endDelayPending = false;
     static bool s_endQueued = false;     // the end has been pushed; OnGameStart may fire per-player
     static bool s_roundEnded = false;    // a round ended; drain-check on next lobby tick
     static std::chrono::steady_clock::time_point s_windowStart;
+    static std::chrono::steady_clock::time_point s_endReadyAt;
     static std::unordered_map<uint8_t, uint32_t> s_levelBefore; // PlayerId -> PlayerLevel snapshot
 
     static bool HasHostAuthority() {
@@ -188,6 +190,21 @@ namespace DrainXp {
             StopForHostLeaving();
             return;
         }
+        if (s_endDelayPending
+            && std::chrono::steady_clock::now() >= s_endReadyAt
+            && IsInGame()
+            && State.GameLoaded) {
+            s_endDelayPending = false;
+            s_endQueued = true;
+            if (State.DrainXpEndViaMeeting) {
+                s_meetingEndPending = true;
+                State.rpcQueue.push(new RpcReportBody({}));
+            }
+            else {
+                s_forcedEndPending = true;
+                State.rpcQueue.push(new RpcEndGame(GameOverReason__Enum(0)));
+            }
+        }
         if (IsInLobby()) TickLobby();
     }
 
@@ -217,7 +234,7 @@ namespace DrainXp {
 
     // First in-game tick after the loading bar finishes.
     void TickGameLoaded() {
-        if (!s_running || s_endQueued) return;
+        if (!s_running || s_endDelayPending || s_endQueued) return;
         if (State.PanicMode) {
             Stop();
             return;
@@ -227,19 +244,10 @@ namespace DrainXp {
             return;
         }
 
-        // End the round right after the loading bar completed. This is exactly
-        // the moment the game is playable - anything earlier risks failing
-        // mid-load and crashing the lobby. OnGameStart fires once per player
-        // control, so s_endQueued keeps us from enqueueing a second end.
-        s_endQueued = true;
-        if (State.DrainXpEndViaMeeting) {
-            s_meetingEndPending = true;
-            State.rpcQueue.push(new RpcReportBody({}));
-        }
-        else {
-            s_forcedEndPending = true;
-            State.rpcQueue.push(new RpcEndGame(GameOverReason__Enum(0)));
-        }
+        // Let the original OnGameStart handler and game initialization finish
+        // before scheduling an end. This hook can fire once per player control.
+        s_endDelayPending = true;
+        s_endReadyAt = std::chrono::steady_clock::now() + std::chrono::seconds(1);
     }
 
     static void StopWithMessage(const std::string& message) {
@@ -249,6 +257,7 @@ namespace DrainXp {
         s_finalWindow = false;
         s_forcedEndPending = false;
         s_meetingEndPending = false;
+        s_endDelayPending = false;
         s_endQueued = false;
         s_roundEnded = false;
         s_levelBefore.clear();
@@ -273,6 +282,7 @@ namespace DrainXp {
         s_finalWindow = false;
         s_forcedEndPending = false;
         s_meetingEndPending = false;
+        s_endDelayPending = false;
         s_endQueued = false;
         s_roundEnded = false;
 
@@ -303,6 +313,7 @@ namespace DrainXp {
         if (!s_running) return;
         s_forcedEndPending = false;
         s_meetingEndPending = false;
+        s_endDelayPending = false;
         s_endQueued = false;         // next round is allowed to enqueue its end
         s_roundEnded = true;         // drain-check runs when we reach the lobby again
     }

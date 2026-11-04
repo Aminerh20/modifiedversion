@@ -36,5 +36,8 @@ namespace PlayersTab {
 	void StopProtectionLoop();
 	void ClearProtectionTargets();
 	void RenderProtectionControls();
+	void TickKillLoop();
+	void StopKillLoop();
+	void RenderKillControls();
 	void OpenSubGroup(const std::string& name);
 }
