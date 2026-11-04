@@ -64,6 +64,10 @@ namespace DrainXpV2 {
     static int  s_lobby = 0;
     static int  s_roundsHere = 0;
 
+    // Whether the round in flight is a loaded one (first in this lobby, or the
+    // fast loop already broke). Loaded rounds get the generous clocks below.
+    static bool s_loadedRound = false;
+
     // When the current stage began, and the last time the lobby was seen
     // ready for the next start (both Time.time).
     static float s_stageAt = 0.f;
@@ -87,6 +91,15 @@ namespace DrainXpV2 {
     static constexpr float s_StageTimeout = 3.f;
     static constexpr float s_RejoinTimeout = 8.f;
     static constexpr float s_IdleTimeout = 6.f;
+
+    // Loaded rounds legitimately take tens of seconds (map load, spawn, the
+    // end flow, a return to the lobby). Judging them by the fast clock starved
+    // the loaded rounds and the watchdog kicked the host out of their own game,
+    // so they get their own generous windows - the old drain's habit was 30s
+    // rejoin windows, and this matches it.
+    static constexpr float s_LoadedStartTimeout = 60.f;
+    static constexpr float s_LoadedStageTimeout = 30.f;
+    static constexpr float s_LoadedRejoinTimeout = 30.f;
 
     // Minimum gap between the lobby being ready and the next start. Fast.cs:
     // "at 0ms a tester was kicked for Hacking twice, about fifty rounds into
@@ -142,6 +155,7 @@ namespace DrainXpV2 {
         s_joinAt = -1.f;
         s_sceneReloadSent = false;
         s_readySince = -1.f;
+        s_loadedRound = false;
         Toast(message);
     }
 
@@ -174,6 +188,7 @@ namespace DrainXpV2 {
     static void CompleteRound() {
         s_joinSent = false;
         s_sceneReloadSent = false;
+        s_loadedRound = false;
         if (++s_roundsDone >= s_roundsTarget) {
             StopWithMessage("Done: " + std::to_string(s_roundsDone) + " round(s).");
             return;
@@ -252,16 +267,20 @@ namespace DrainXpV2 {
 
         switch (s_stage) {
         case Stage::Starting:
-            // Waiting for the server's start confirmation (handled in HandleMessage).
-            if (now - s_stageAt > s_StageTimeout) {
+            // Fast rounds are confirmed in HandleMessage within one round trip;
+            // loaded rounds need the map to load and are instead ended by
+            // TickGameLoaded once they spawn. Never judge them by the same clock.
+            if (now - s_stageAt > (s_loadedRound ? s_LoadedStartTimeout : s_StageTimeout)) {
                 Fail("the server never confirmed the start");
                 return;
             }
             break;
 
         case Stage::Ending:
-            // Waiting for the server's end confirmation (handled in HandleMessage).
-            if (now - s_stageAt > s_StageTimeout) {
+            // Waiting for the server's end confirmation. Loaded rounds also
+            // have their whole end flow to play out first - the clock follows
+            // the round type, same rule as Starting.
+            if (now - s_stageAt > (s_loadedRound ? s_LoadedStageTimeout : s_StageTimeout)) {
                 Fail("the server never confirmed the end");
                 return;
             }
@@ -302,7 +321,7 @@ namespace DrainXpV2 {
                 LOG_ERROR(std::format("Drain XP v2: rejoin landed on a map scene - loading the lobby by hand."));
                 app::SceneManager_LoadScene(convert_to_string("OnlineGame"), NULL);
             }
-            if (now - s_stageAt > s_RejoinTimeout) {
+            if (now - s_stageAt > (s_loadedRound ? s_LoadedRejoinTimeout : s_RejoinTimeout)) {
                 Fail("the lobby did not come back after the end");
                 return;
             }
@@ -313,6 +332,24 @@ namespace DrainXpV2 {
         default: {
             if (!LobbyReady(client)) {
                 if (s_readySince >= 0.f) s_readySince = -1.f;
+                // A Started state after a fail: a loaded round is still in
+                // flight (the map is up or loading) and its own end flow will
+                // bring the lobby back - wait for it, never double-fail a
+                // round that is merely still running. A "fast" round must
+                // never linger Started (its whole cycle is swallowed messages,
+                // so Started there is a genuine stall) - and without the hook
+                // it would be marked loaded anyway, so this wait can only be
+                // a real in-flight round. It is still bounded: if even the
+                // loaded stage window passes with no lobby return, the round
+                // is not coming back and the stall rules apply.
+                if (client->fields.GameState == InnerNetClient_GameStates__Enum::Started
+                    && s_loadedRound) {
+                    if (now - s_stageAt > s_LoadedStageTimeout) {
+                        Fail("the lobby never became ready");
+                        return;
+                    }
+                    return;
+                }
                 // Never became usable again (e.g. stuck in GameState Ended).
                 if (now - s_stageAt > s_IdleTimeout) {
                     Fail("the lobby never became ready");
@@ -337,6 +374,9 @@ namespace DrainXpV2 {
             }
 
             s_readySince = -1.f;
+            // Fast rounds need the swallow hook: without it every round loads
+            // for real, so treat a missing hook as a permanent loaded round.
+            s_loadedRound = (s_roundsHere == 0 || s_broken || app::InnerNetClient_HandleMessage == nullptr);
             if (!StartRound()) return;
             s_stage = Stage::Starting;
             s_stageAt = now;
@@ -431,11 +471,21 @@ namespace DrainXpV2 {
         s_broken = false;
         s_fails = 0;
         s_readySince = -1.f;
+        s_loadedRound = false;
         s_lobby = client->fields.GameId;
         s_roundsHere = 0;
         s_stageAt = Time_get_time(NULL);
 
         Toast("Starting: " + std::to_string(s_roundsTarget) + " round(s).");
+
+        // The fast loop rides a hook on InnerNetClient::HandleMessage. If the
+        // signature did not resolve in this build the hook never installed and
+        // the message is never seen: say so up front so a run that only loads
+        // rounds is a known state, not a silent surprise.
+        if (app::InnerNetClient_HandleMessage == nullptr) {
+            LOG_ERROR(std::format("Drain XP v2: the message hook is not installed in this build - fast rounds unavailable, loaded rounds only."));
+            Toast("Fast loop unavailable in this build - loaded rounds only.");
+        }
     }
 
     void Stop() {
