@@ -147,6 +147,7 @@ void DetourInitilization() {
 	HOOKFUNC(MeetingHud_Awake);
 	HOOKFUNC(MeetingHud_Close);
 	HOOKFUNC(InnerNetClient_Update);
+	HOOKFUNC(InnerNetClient_HandleMessage);
 	HOOKFUNC(AmongUsClient_OnGameJoined);
 	HOOKFUNC(PlayerControl_OnGameStart);
 	HOOKFUNC(AmongUsClient_OnPlayerLeft);
@@ -376,6 +377,7 @@ void DetourUninitialization()
 	UNHOOKFUNC(MeetingHud_Awake);
 	UNHOOKFUNC(MeetingHud_Close);
 	UNHOOKFUNC(InnerNetClient_Update);
+	UNHOOKFUNC(InnerNetClient_HandleMessage);
 	UNHOOKFUNC(AmongUsClient_OnGameJoined);
 	UNHOOKFUNC(PlayerControl_OnGameStart);
 	UNHOOKFUNC(AmongUsClient_OnPlayerLeft);

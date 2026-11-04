@@ -937,6 +937,9 @@ public:
     bool DrainXpEndViaMeeting = false;
     bool DrainXpChat = true;
 
+    // Drain XP v2 [Dependencies]
+    int DrainXpV2Rounds = 10;
+
     /*int BanDays = 0;
     int BanHours = 0;
     int BanMinutes = 0;

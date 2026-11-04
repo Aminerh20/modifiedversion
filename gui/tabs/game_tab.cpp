@@ -7,6 +7,7 @@
 #include "logger.h"
 #include "players_tab.h"
 #include "../../improvements/DrainXp.h"
+#include "../../improvements/DrainXpV2.h"
 
 static std::string strToLower(std::string str) {
     std::string new_str = "";
@@ -249,6 +250,40 @@ namespace GameTab {
 
                 if (drainStatus == 0) {
                     ImGui::TextDisabled("Host only - uses level-ups as an XP proxy; starts a round,\nends after loading, and announces detected level-ups.");
+                }
+            }
+
+            // Drain XP v2 - host-only fast drain: force-starts and ends N rounds
+            // (the user picks the count) as fast as the server accepts, with no
+            // level detection. Rounds 2+ in a lobby skip drawing the map entirely.
+            if (IsHost() && IsInLobby()) {
+                ImGui::Dummy(ImVec2(7, 7) * State.dpiScale);
+                ImGui::Separator();
+                ImGui::Dummy(ImVec2(7, 7) * State.dpiScale);
+
+                int v2Status = DrainXpV2::GetRunningStatus();
+
+                if (v2Status == 0) {
+                    if (AnimatedButton("Drain XP v2")) {
+                        DrainXpV2::Start();
+                    }
+                }
+                else {
+                    if (ColoredButton(ImVec4(1.f, 0.f, 0.f, 1.f), "Drain XP v2 [Running...]")) {
+                        DrainXpV2::Stop();
+                    }
+                }
+                ImGui::SetNextItemWidth(100 * State.dpiScale);
+                if (ImGui::InputInt("Rounds", &State.DrainXpV2Rounds)) {
+                    State.DrainXpV2Rounds = std::clamp(State.DrainXpV2Rounds, 1, 1000);
+                    State.Save();
+                }
+
+                if (v2Status != 0) {
+                    ImGui::TextColored(ImVec4(0.f, 1.f, 0.5f, 1.f), "Round %d/%d", DrainXpV2::GetRoundsDone(), DrainXpV2::GetRoundsTarget());
+                }
+                else {
+                    ImGui::TextDisabled("Host only - ends %d rounds and stops; no level detection.\nFastest with an empty lobby.", State.DrainXpV2Rounds);
                 }
             }
             /*if (IsHost() && (IsInGame() || IsInLobby()) && AnimatedButton("Spawn Dummy")) {

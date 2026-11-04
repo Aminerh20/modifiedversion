@@ -15,6 +15,7 @@
 #include "achievements.hpp"
 #include "../gui/tabs/players_tab.h"
 #include "../improvements/DrainXp.h"
+#include "../improvements/DrainXpV2.h"
 using namespace std::string_view_literals;
 
 static bool autoStartedGame = false;
@@ -163,6 +164,7 @@ void dInnerNetClient_Update(InnerNetClient* __this, MethodInfo* method) {
         // Tick outside the lobby too, so loss of host authority cancels the run.
         DrainXp::Tick();
         drainXpInFlight = DrainXp::GetRunningStatus() != 0;
+        DrainXpV2::Tick();
 
         if (State.unlockAllAchievements) {
             Achievements::UnlockAll();
@@ -2060,6 +2062,22 @@ void dInnerNetClient_EnqueueDisconnect(InnerNetClient* __this, DisconnectReasons
         LOG_ERROR("Exception occurred in InnerNetClient_EnqueueDisconnect (InnerNetClient)");
     }
     return InnerNetClient_EnqueueDisconnect(__this, reason, stringReason, method);
+}
+
+// Drain XP v2: the client's incoming-message dispatcher. While a fast run is
+// mid-start, the server's StartGame confirmation (tag 2) is swallowed so the
+// round never materializes; the end message (tag 8) is let through so OnGameEnd
+// still applies the XP grant, exactly as it does for a real round.
+void dInnerNetClient_HandleMessage(InnerNetClient* __this, MessageReader* reader, MethodInfo* method) {
+    if (State.ShowHookLogs) Log.HookDebug("Hook dInnerNetClient_HandleMessage executed", false);
+    try {
+        if (DrainXpV2::HandleMessage(__this, reader))
+            return; // swallowed: the round must not materialize
+    }
+    catch (...) {
+        LOG_ERROR("Exception occurred in InnerNetClient_HandleMessage (InnerNetClient)");
+    }
+    InnerNetClient_HandleMessage(__this, reader, method);
 }
 
 void dGameManager_RpcEndGame(GameManager* __this, GameOverReason__Enum endReason, bool showAd, MethodInfo* method) {

@@ -479,6 +479,8 @@ void Settings::Load() {
 
         JSON_TRYGET("DrainXpEndViaMeeting", this->DrainXpEndViaMeeting);
         JSON_TRYGET("DrainXpChat", this->DrainXpChat);
+        JSON_TRYGET("DrainXpV2Rounds", this->DrainXpV2Rounds);
+        this->DrainXpV2Rounds = std::clamp(this->DrainXpV2Rounds, 1, 1000);
 
         JSON_TRYGET("Enable_SMAC", this->Enable_SMAC);
         JSON_TRYGET("SMAC_Punishment", this->SMAC_Punishment);
@@ -1197,6 +1199,7 @@ void Settings::Save() {
 
                 { "DrainXpEndViaMeeting", this->DrainXpEndViaMeeting },
                 { "DrainXpChat", this->DrainXpChat },
+                { "DrainXpV2Rounds", this->DrainXpV2Rounds },
 
                 { "Enable_SMAC", this->Enable_SMAC },
                 { "SMAC_Punishment", this->SMAC_Punishment },
