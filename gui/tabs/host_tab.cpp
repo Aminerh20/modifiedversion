@@ -480,7 +480,7 @@ namespace HostTab {
                     if (State.UseGameModeDuration) {
                         ImGui::SetNextItemWidth(100 * State.dpiScale);
                         if (ImGui::InputInt("Game Duration", &State.GameModeDuration)) {
-                            State.GameModeDuration = std::clamp(State.GameModeDuration, 100, 1000);
+                            State.GameModeDuration = std::clamp(State.GameModeDuration, 1, 1000);
                         }
                     }
                 }

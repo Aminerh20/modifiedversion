@@ -472,7 +472,7 @@ void Settings::Load() {
         JSON_TRYGET("StartCountdown", this->StartCountdown);
         JSON_TRYGET("UseGameModeDuration", this->UseGameModeDuration);
         JSON_TRYGET("GameModeDuration", this->GameModeDuration);
-        this->GameModeDuration = std::clamp(this->GameModeDuration, 100, 1000);
+        this->GameModeDuration = std::clamp(this->GameModeDuration, 1, 1000);
 
         JSON_TRYGET("DrainXpEndViaMeeting", this->DrainXpEndViaMeeting);
         JSON_TRYGET("DrainXpChat", this->DrainXpChat);
