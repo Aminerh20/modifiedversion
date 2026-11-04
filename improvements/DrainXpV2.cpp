@@ -277,7 +277,15 @@ namespace DrainXpV2 {
             // End confirmed, no auto-return: rejoin the same lobby the way the
             // end screen's "Play Again" button does.
             if (!s_joinSent && client->fields.GameState == InnerNetClient_GameStates__Enum::Ended) {
-                app::InnerNetClient_JoinGame((InnerNetClient*)(*Game::pAmongUsClient), true, NULL);
+                if (app::InnerNetClient_JoinGame != nullptr) {
+                    app::InnerNetClient_JoinGame((InnerNetClient*)(*Game::pAmongUsClient), true, NULL);
+                }
+                else {
+                    // The signature did not resolve (version mismatch): skip the
+                    // direct rejoin - the watchdog degrades the run rather than
+                    // calling through a null pointer.
+                    LOG_ERROR(std::format("Drain XP v2: InnerNetClient_JoinGame unresolved - relying on the natural lobby return."));
+                }
                 s_joinSent = true;
                 s_joinAt = now;
             }

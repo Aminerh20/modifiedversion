@@ -7,7 +7,7 @@ void DetourUninitialization();
 
 bool dAutoOpenDoor_DoUpdate(AutoOpenDoor* __this, float dt, MethodInfo* method);
 void dInnerNetClient_Update(InnerNetClient* __this, MethodInfo* method);
-void dInnerNetClient_HandleMessage(InnerNetClient* __this, MessageReader* reader, MethodInfo* method);
+bool dInnerNetClient_HandleMessage(InnerNetClient* __this, MessageReader* reader, MethodInfo* method);
 void dAmongUsClient_OnGameJoined(AmongUsClient* __this, String* gameIdString, MethodInfo* method);
 void dPlayerControl_OnGameStart(PlayerControl* __this, MethodInfo* method);
 void dAmongUsClient_OnPlayerLeft(AmongUsClient* __this, ClientData* data, DisconnectReasons__Enum reason, MethodInfo* method);
