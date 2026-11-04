@@ -327,6 +327,7 @@
     <ClCompile Include="rpc\RpcSnapTo.cpp" />
     <ClCompile Include="gui\tabs\self_tab.cpp" />
     <ClCompile Include="improvements\DrainXp.cpp" />
+    <ClCompile Include="improvements\DrainXpV2.cpp" />
     <ClCompile Include="user\logger.cpp" />
     <ClCompile Include="user\profiler.cpp" />
     <ClCompile Include="user\resources.cpp" />
@@ -548,6 +549,7 @@
     <ClInclude Include="gui\tabs\esp_tab.h" />
     <ClInclude Include="gui\tabs\game_tab.h" />
     <ClInclude Include="improvements\DrainXp.h" />
+    <ClInclude Include="improvements\DrainXpV2.h" />
     <ClInclude Include="gui\tabs\host_tab.h" />
     <ClInclude Include="gui\tabs\players_tab.h" />
     <ClInclude Include="gui\tabs\radar_tab.h" />
