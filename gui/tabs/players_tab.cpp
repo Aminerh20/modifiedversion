@@ -160,7 +160,7 @@ namespace PlayersTab {
         return true;
     }
 
-        void TickProtectionLoop() {
+    void TickProtectionLoop() {
         if (!protectionToggleUiEnabled) return;
         if (!(IsInGame() || IsInLobby()) || protectionTargets.empty()) {
             StopProtectionLoop();
