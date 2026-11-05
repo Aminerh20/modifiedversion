@@ -6,6 +6,7 @@
 #include "game.h"
 #include "logger.h"
 #include <chrono>
+#include "../gui/tabs/players_tab.h"
 
 static app::Type* voteSpreaderType = nullptr;
 static bool calloutOver = false;
@@ -533,6 +534,16 @@ void dMeetingHud_CheckForEndVoting(MeetingHud* __this, MethodInfo* method) {
     if (State.VoteOffPlayerId != Game::HasNotVoted) {
         for (auto playerState : playerStates) {
             playerState->fields._VotedForId_k__BackingField.Value = State.VoteOffPlayerId;
+        }
+    }
+
+        if (IsHost()) {
+        for (auto playerState : playerStates) {
+            uint8_t votedFor = playerState->fields._VotedForId_k__BackingField.Value;
+            if (votedFor >= Game::MAX_PLAYERS) continue; // skip/missed/not-voted markers
+            auto pc = GetPlayerControlById(votedFor);
+            if (pc != nullptr && PlayersTab::IsProtectionActiveFor(pc))
+                playerState->fields._VotedForId_k__BackingField.Value = Game::SkippedVote;
         }
     }
     

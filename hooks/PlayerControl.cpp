@@ -13,6 +13,7 @@
 #include <iostream>
 #include <optional>
 #include "logger.h"
+#include "../gui/tabs/players_tab.h"
 
 using namespace std::chrono;
 
@@ -1111,7 +1112,8 @@ void dPlayerControl_CmdCheckMurder(PlayerControl* __this, PlayerControl* target,
 {
     if (State.ShowHookLogs) Log.HookDebug("Hook dPlayerControl_CmdCheckMurder executed", false);
     if (!State.PanicMode) {
-        if (State.DisableKills || (IsHost() && State.GodMode && target == *Game::pLocalPlayer)) return;
+        if (State.DisableKills ||
+            (IsHost() && (target == *Game::pLocalPlayer || PlayersTab::IsProtectionActiveFor(target)))) return;
 
         if (IsHost() || !State.SafeMode) {
             if (target->fields.protectedByGuardianId >= 0 && State.BypassAngelProt) {
@@ -1152,6 +1154,8 @@ void dPlayerControl_CheckMurder(PlayerControl* __this, PlayerControl* target, Me
         if (State.SafeMode && State.Enable_SMAC && State.SMAC_CheckMurder) SMAC_OnCheatDetected(__this, "Abnormal Murder Player");
         return; // Don't send direct murder as non-host or in lobby
     }
+    if (!State.PanicMode && PlayersTab::IsProtectionActiveFor(target))
+        return PlayerControl_RpcMurderPlayer(__this, target, false, NULL);
     if (IsHost() && State.BattleRoyale && State.DisableHostAnticheat)
         return PlayerControl_RpcMurderPlayer(__this, target, true, NULL); // Force succeed murder in battle royale
     auto pData = GetPlayerData(__this), tData = GetPlayerData(target);
@@ -1177,6 +1181,7 @@ void dPlayerControl_RpcShapeshift(PlayerControl* __this, PlayerControl* target, 
     if (State.ShowHookLogs) Log.HookDebug("Hook dPlayerControl_RpcShapeshift executed", false);
     if (!State.PanicMode && __this == *Game::pLocalPlayer) PlayerControl_RpcShapeshift(__this, target, (State.PanicMode ? animate : (!State.AnimationlessShapeshift && animate)), method);
     else PlayerControl_RpcShapeshift(__this, target, animate, method);
+        
 }
 
 void dPlayerControl_CmdCheckShapeshift(PlayerControl* __this, PlayerControl* target, bool animate, MethodInfo* method)

@@ -40,4 +40,5 @@ namespace PlayersTab {
 	void StopKillLoop();
 	void RenderKillControls();
 	void OpenSubGroup(const std::string& name);
+	bool IsProtectionActiveFor(PlayerControl* pc);
 }

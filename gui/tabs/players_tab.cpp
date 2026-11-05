@@ -150,75 +150,53 @@ namespace PlayersTab {
         protectionTargets.clear();
     }
 
-    void TickProtectionLoop() {
+    bool IsProtectionActiveFor(PlayerControl* pc) {
+        if (!protectionToggleUiEnabled || pc == nullptr) return false;
+        if (std::find(protectionTargets.begin(), protectionTargets.end(), pc->fields.PlayerId) == protectionTargets.end()) return false;
+        if (protectionCrewmatesOnly) {
+            auto d = GetPlayerData(pc);
+            if (d == nullptr || d->fields.Role == nullptr || PlayerIsImpostor(d)) return false;
+        }
+        return true;
+    }
+
+        void TickProtectionLoop() {
         if (!protectionToggleUiEnabled) return;
         if (!(IsInGame() || IsInLobby()) || protectionTargets.empty()) {
             StopProtectionLoop();
             return;
         }
-        if (*Game::pLocalPlayer == nullptr) return;
+        if (Game::pLocalPlayer == nullptr || *Game::pLocalPlayer == nullptr) return;
 
         auto now = std::chrono::steady_clock::now();
         long long elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastProtectionTime).count();
-        const int targetCount = static_cast<int>(protectionTargets.size());
-        const int targetIntervalMs = (std::max)(protectionIntervalMs, 1);
-        const int dispatchIntervalMs = (std::max)(
-            1, targetIntervalMs / targetCount + (targetIntervalMs % targetCount != 0));
-        const int fps = GetFps();
-        const int frameIntervalMs = fps > 0 ? (std::max)(1000 / fps, 1) : 1;
-        const int intervalMs = (std::max)(dispatchIntervalMs, frameIntervalMs);
+        const int intervalMs = (std::max)(protectionIntervalMs, 1);
         if (elapsed < intervalMs) return;
         lastProtectionTime = now;
 
-        auto localData = GetPlayerData(*Game::pLocalPlayer);
-        if (localData == nullptr) return;
-        app::RoleBehaviour* playerRole = localData->fields.Role;
-        app::RoleTypes__Enum role = playerRole != nullptr ? playerRole->fields.Role : app::RoleTypes__Enum::Crewmate;
-
-        bool isGuardianAngel = State.RealRole == RoleTypes__Enum::GuardianAngel && role == RoleTypes__Enum::GuardianAngel;
         bool canForce = (IsHost() && IsInGame()) || !State.SafeMode;
-        if (!isGuardianAngel && !canForce) {
+        if (!canForce) {
             StopProtectionLoop();
             return;
         }
 
-        std::queue<RPCInterface*>* queue = IsInGame() ? &State.rpcQueue : &State.lobbyRpcQueue;
-
-        if (isGuardianAngel) {
-            auto* ga = (app::GuardianAngelRole*)playerRole;
-            if (ga->fields.cooldownSecondsRemaining > 0) return;
-            for (size_t attempts = 0; attempts < protectionTargets.size(); ++attempts) {
-                const size_t index = protectionTargetIndex % protectionTargets.size();
-                protectionTargetIndex = (index + 1) % protectionTargets.size();
-                auto pc = GetPlayerControlById(protectionTargets[index]);
-                if (pc == nullptr) continue;
-                auto targetData = GetPlayerData(pc);
-                if (targetData == nullptr) continue;
-                if (protectionCrewmatesOnly &&
-                    (targetData->fields.Role == nullptr || PlayerIsImpostor(targetData))) continue;
-                auto sel = PlayerSelection(pc);
-                if (!sel.has_value()) continue;
-                queue->push(new CmdCheckProtect(*Game::pLocalPlayer, sel));
-                return;
-            }
-            return;
-        }
-
-        for (size_t attempts = 0; attempts < protectionTargets.size(); ++attempts) {
-            const size_t index = protectionTargetIndex % protectionTargets.size();
-            protectionTargetIndex = (index + 1) % protectionTargets.size();
-            auto pc = GetPlayerControlById(protectionTargets[index]);
+        // protect ALL targets at once on each interval
+        for (auto id : protectionTargets) {
+            auto pc = GetPlayerControlById(id);
             if (pc == nullptr) continue;
             auto targetData = GetPlayerData(pc);
-            if (targetData == nullptr) continue;
-            if (protectionCrewmatesOnly &&
-                (targetData->fields.Role == nullptr || PlayerIsImpostor(targetData))) continue;
-            auto sel = PlayerSelection(pc);
-            if (!sel.has_value()) continue;
+            if (targetData == nullptr || targetData->fields.Disconnected) continue;
+            if (!IsProtectionActiveFor(pc)) continue;
+
+            bool alreadyProtected = false;
+            synchronized(State.protectMutex) {
+                alreadyProtected = State.protectMonitor.find(pc->fields.PlayerId) != State.protectMonitor.end();
+            }
+            if (alreadyProtected) continue;
+
             auto outfit = GetPlayerOutfit(targetData);
             if (outfit == nullptr) continue;
-            queue->push(new RpcProtectPlayer(*Game::pLocalPlayer, sel, outfit->fields.ColorId));
-            return;
+            PlayerControl_RpcProtectPlayer(*Game::pLocalPlayer, pc, outfit->fields.ColorId, NULL);
         }
     }
 
@@ -274,19 +252,21 @@ namespace PlayersTab {
                 else {
                     protectionCrewmatesOnly = crewmatesOnly;
                     protectionTargetIndex = 0;
-                    lastProtectionTime = std::chrono::steady_clock::now() - std::chrono::milliseconds((std::max)(protectionIntervalMs, 1));
+                    lastProtectionTime = std::chrono::steady_clock::now() -
+                        std::chrono::milliseconds((std::max)(protectionIntervalMs, 1));
                 }
                 return;
             }
 
-                        if (protectionTargets.empty()) {
+            if (protectionTargets.empty()) {
                 for (auto playerId : State.selectedPlayers) protectionTargets.push_back(playerId);
             }
             if (!protectionTargets.empty()) {
                 protectionTargetIndex = 0;
                 protectionCrewmatesOnly = crewmatesOnly;
                 protectionToggleUiEnabled = true;
-                lastProtectionTime = std::chrono::steady_clock::now() - std::chrono::milliseconds((std::max)(protectionIntervalMs, 1));
+                lastProtectionTime = std::chrono::steady_clock::now() -
+                    std::chrono::milliseconds((std::max)(protectionIntervalMs, 1));
             }
         };
 
@@ -345,7 +325,7 @@ namespace PlayersTab {
         ImGui::SetNextItemWidth(120 * State.dpiScale);
         ImGui::InputInt("##protectionIntervalMs", &protectionIntervalMs, 1, 10);
         ImGui::SameLine();
-        ImGui::Text("ms/player%s", protectionToggleUiEnabled
+        ImGui::Text("ms/target%s", protectionToggleUiEnabled
             ? (protectionCrewmatesOnly ? " (Crew Only On)" : " (On)")
             : " (Off)");
         if (protectionIntervalMs < 1) protectionIntervalMs = 1;
