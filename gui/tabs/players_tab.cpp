@@ -145,6 +145,12 @@ namespace PlayersTab {
         protectionTargetIndex = 0;
     }
 
+        void ReapplyProtectionNow() {
+        if (!protectionToggleUiEnabled) return;
+        lastProtectionTime = std::chrono::steady_clock::now() -
+            std::chrono::milliseconds((std::max)(protectionIntervalMs, 1));
+    }
+    
     void ClearProtectionTargets() {
         StopProtectionLoop();
         protectionTargets.clear();
@@ -187,13 +193,6 @@ namespace PlayersTab {
             auto targetData = GetPlayerData(pc);
             if (targetData == nullptr || targetData->fields.Disconnected) continue;
             if (!IsProtectionActiveFor(pc)) continue;
-
-            bool alreadyProtected = false;
-            synchronized(State.protectMutex) {
-                alreadyProtected = State.protectMonitor.find(pc->fields.PlayerId) != State.protectMonitor.end();
-            }
-            if (alreadyProtected) continue;
-
             auto outfit = GetPlayerOutfit(targetData);
             if (outfit == nullptr) continue;
             PlayerControl_RpcProtectPlayer(*Game::pLocalPlayer, pc, outfit->fields.ColorId, NULL);

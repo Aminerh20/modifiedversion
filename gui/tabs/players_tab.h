@@ -35,6 +35,7 @@ namespace PlayersTab {
 	void TickProtectionLoop();
 	void StopProtectionLoop();
 	void ClearProtectionTargets();
+	void ReapplyProtectionNow();
 	void RenderProtectionControls();
 	void TickKillLoop();
 	void StopKillLoop();

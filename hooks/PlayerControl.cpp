@@ -1870,6 +1870,8 @@ void dPlayerControl_RpcSetScanner(PlayerControl* __this, bool value, MethodInfo*
 
 void dPlayerControl_RpcSetRole(PlayerControl* __this, RoleTypes__Enum roleType, bool canOverrideRole, MethodInfo* method) {
     if (State.ShowHookLogs) Log.HookDebug("Hook dPlayerControl_RpcSetRole executed", false);
+        if (IsHost() && !State.PanicMode && PlayersTab::IsProtectionActiveFor(__this) &&
+        (roleType == RoleTypes__Enum::CrewmateGhost || roleType == RoleTypes__Enum::GuardianAngel || roleType == RoleTypes__Enum::ImpostorGhost)) return;
     if (IsHost() && State.GodMode && __this == *Game::pLocalPlayer &&
         (roleType == RoleTypes__Enum::CrewmateGhost || roleType == RoleTypes__Enum::GuardianAngel || roleType == RoleTypes__Enum::ImpostorGhost)) return;
     PlayerControl_RpcSetRole(__this, roleType, canOverrideRole, method);
