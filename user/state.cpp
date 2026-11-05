@@ -251,6 +251,7 @@ void Settings::Load() {
         }
 
         JSON_TRYGET("NoGameEnd", this->NoGameEnd);
+        JSON_TRYGET("EndGameV2", this->EndGameV2);
         JSON_TRYGET("DisableMeetings", this->DisableMeetings);
         JSON_TRYGET("DisableSabotages", this->DisableSabotages);
         JSON_TRYGET("DisableAllVotekicks", this->DisableAllVotekicks);
@@ -904,6 +905,7 @@ void Settings::Save() {
                 { "RandomSpawns", this->RandomSpawns },
 
                 { "NoGameEnd", this->NoGameEnd },
+                { "EndGameV2", this->EndGameV2 },
                 { "DisableMeetings", this->DisableMeetings },
                 { "DisableSabotages", this->DisableSabotages },
                 { "DisableAllVotekicks", this->DisableAllVotekicks },

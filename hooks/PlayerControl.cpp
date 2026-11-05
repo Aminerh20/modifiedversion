@@ -943,7 +943,13 @@ bool dPlayerControl_get_CanMove(PlayerControl* __this, MethodInfo* method) {
 void dPlayerControl_OnGameStart(PlayerControl* __this, MethodInfo* method) {
     if (State.ShowHookLogs) Log.HookDebug("Hook dPlayerControl_OnGameStart executed", false);
     try {
+        const bool firstGameLoad = !State.GameLoaded;
         State.GameLoaded = true;
+
+        if (firstGameLoad && State.EndGameV2 && IsHost() && IsInGame()) {
+            State.rpcQueue.push(new RpcEndGame(
+                GameOverReason__Enum(std::clamp(State.SelectedGameEndReasonId, 0, 8))));
+        }
 
         // Drain XP: the loading bar is finally done - act on it now if a drain
         // run is active with a round pending.

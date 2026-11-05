@@ -568,6 +568,11 @@ namespace HostTab {
                             State.rpcQueue.push(new RpcEndGame(GameOverReason__Enum(std::clamp(State.SelectedGameEndReasonId, 0, 8))));
                         }
                     }
+
+                    if (IsHost() && (IsInLobby() || IsInGame()) &&
+                        ToggleButton("End Game V2", &State.EndGameV2)) {
+                        State.Save();
+                    }
                 }
 
                 CustomListBoxIntColored("Select Color", &State.HostSelectedColorId, HOSTCOLORS, 85.0f * State.dpiScale, ImVec4(0.f, 0.f, 0.f, 0.f), 0, "", COLOR_NAMES_COLOR, IM_ARRAYSIZE(COLOR_NAMES_COLOR));

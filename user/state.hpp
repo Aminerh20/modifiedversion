@@ -149,6 +149,7 @@ public:
     float ForceEndAfterStartTimer = 0.f;
     bool ForceEndAfterStartTriggered = false;
     bool NoGameEnd = false;
+    bool EndGameV2 = false;
     bool ChatSpam = false;
     bool CrashChatSpam = false;
     bool ChatSpamEveryone = false;
