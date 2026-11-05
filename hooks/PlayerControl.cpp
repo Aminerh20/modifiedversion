@@ -947,8 +947,27 @@ void dPlayerControl_OnGameStart(PlayerControl* __this, MethodInfo* method) {
         State.GameLoaded = true;
 
         if (firstGameLoad && State.EndGameV2 && IsHost() && IsInGame()) {
-            State.rpcQueue.push(new RpcEndGame(
-                GameOverReason__Enum(std::clamp(State.SelectedGameEndReasonId, 0, 8))));
+            const int reasonId = std::clamp(State.SelectedGameEndReasonId, 0, 8);
+            GameManager* gameManager = GameManager__TypeInfo->static_fields->_Instance_k__BackingField;
+            if (Object_1_IsNull((Object_1*)gameManager)) {
+                Log.Error("ENDGAMEV2", "Game manager is unavailable after game load; end-game request was not sent.");
+            }
+            else {
+                Log.Info("ENDGAMEV2", std::format("Requesting end game after load (reason {}).", reasonId));
+                try {
+                    GameManager_RpcEndGame(
+                        gameManager,
+                        GameOverReason__Enum(reasonId),
+                        false, NULL);
+                }
+                catch (Exception* ex) {
+                    Log.Error("ENDGAMEV2", std::string("Game exception while requesting end game: ") +
+                        (ex ? convert_from_string(ex->fields._message) : "unknown Unity exception"));
+                }
+                catch (...) {
+                    Log.Error("ENDGAMEV2", "Unknown exception while requesting end game.");
+                }
+            }
         }
 
         // Drain XP: the loading bar is finally done - act on it now if a drain

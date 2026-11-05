@@ -559,13 +559,15 @@ namespace HostTab {
                         State.Save();
                     }
 
-                    if (IsInGame()) {
+                    if (IsHost() && (IsInGame() || IsInLobby())) {
                         CustomListBoxIntColored("Reason", &State.SelectedGameEndReasonId, GAMEENDREASON, 120.0f * State.dpiScale, ImVec4(0.f, 0.f, 0.f, 0.f), 0, "", GAMEENDREASONCOLORS, IM_ARRAYSIZE(GAMEENDREASONCOLORS));
 
                         ImGui::SameLine();
 
-                        if (AnimatedButton("End Game")) {
-                            State.rpcQueue.push(new RpcEndGame(GameOverReason__Enum(std::clamp(State.SelectedGameEndReasonId, 0, 8))));
+                        if (IsInGame()) {
+                            if (AnimatedButton("End Game Now")) {
+                                State.rpcQueue.push(new RpcEndGame(GameOverReason__Enum(std::clamp(State.SelectedGameEndReasonId, 0, 8))));
+                            }
                         }
                     }
 
@@ -573,6 +575,7 @@ namespace HostTab {
                         ToggleButton("End Game V2", &State.EndGameV2)) {
                         State.Save();
                     }
+
                 }
 
                 CustomListBoxIntColored("Select Color", &State.HostSelectedColorId, HOSTCOLORS, 85.0f * State.dpiScale, ImVec4(0.f, 0.f, 0.f, 0.f), 0, "", COLOR_NAMES_COLOR, IM_ARRAYSIZE(COLOR_NAMES_COLOR));

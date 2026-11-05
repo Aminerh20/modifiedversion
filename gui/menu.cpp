@@ -379,6 +379,14 @@ namespace Menu {
 				titleCol = State.GradientMenuTheme ? State.MenuGradientColor : State.MenuThemeColor;
 			titleCol.w = 1.f;
 			ImGui::TextColored(titleCol, modText.c_str());
+			if ((IsInGame() || IsInLobby()) &&
+				Object_1_IsNotNull((Object_1*)*Game::pLocalPlayer)) {
+				auto localData = GetPlayerData(*Game::pLocalPlayer);
+				if (localData != NULL) {
+					ImGui::SameLine();
+					ImGui::TextColored(titleCol, "Level %u", localData->fields.PlayerLevel + 1);
+				}
+			}
 			ImVec4 DiddyCol = ImVec4(0.79f, 0.03f, 1.f, 1.f);
 			/*if (State.AprilFoolsMode) {
 				ImGui::SameLine(0.f, 0.f);
