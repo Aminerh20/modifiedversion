@@ -348,7 +348,7 @@ namespace PlayersTab {
         ImGui::InputInt("##killIntervalMs", &killIntervalMs, 1, 10);
         ImGui::SameLine();
         ImGui::Text("ms/attempt%s", killToggleUiEnabled ? " (On)" : " (Off)");
-        if (killIntervalMs < 100) killIntervalMs = 100;
+       
     }
 
     void Render() {
