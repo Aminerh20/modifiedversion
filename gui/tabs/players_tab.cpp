@@ -227,7 +227,7 @@ namespace PlayersTab {
 
         auto now = std::chrono::steady_clock::now();
         long long elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastKillTime).count();
-        const int intervalMs = (std::max)(killIntervalMs, 100);
+        const int intervalMs = killIntervalMs;
         if (elapsed < intervalMs) return;
         lastKillTime = now;
 
