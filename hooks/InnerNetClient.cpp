@@ -20,6 +20,8 @@ using namespace std::string_view_literals;
 
 static bool autoStartedGame = false;
 extern bool editingAutoStartPlayerCount;
+static std::unordered_set<uint8_t> autoLevelPunishmentAttempted;
+static int32_t autoLevelPunishmentLobbyId = -1;
 
 // Drain XP: while a drain run is in flight, the host suppresses ending the
 // game on its own (and suppresses AutoStart/Auto-Kick) so the controlled
@@ -1072,6 +1074,69 @@ void dInnerNetClient_Update(InnerNetClient* __this, MethodInfo* method) {
                     ++it;
                 }
             }
+        }
+
+        if (State.AutoKickBelowLevel || State.AutoBanBelowLevel) {
+            if (State.PanicMode || !IsHost() || !IsInLobby() ||
+                Game::pAmongUsClient == nullptr || *Game::pAmongUsClient == nullptr) {
+                autoLevelPunishmentAttempted.clear();
+                autoLevelPunishmentLobbyId = -1;
+            }
+            else {
+                auto* client = (InnerNetClient*)(*Game::pAmongUsClient);
+                const int32_t lobbyId = client->fields._.GameId;
+                State.MinimumPlayerLevel = std::clamp(State.MinimumPlayerLevel, 1, 100000);
+                if (lobbyId != autoLevelPunishmentLobbyId) {
+                    autoLevelPunishmentAttempted.clear();
+                    autoLevelPunishmentLobbyId = lobbyId;
+                }
+
+                std::unordered_set<uint8_t> activePlayerIds;
+                const auto allPlayers = GetAllPlayerControl();
+                PlayerControl* localPlayer = Game::pLocalPlayer != nullptr ? *Game::pLocalPlayer : nullptr;
+                if (localPlayer == nullptr) {
+                    autoLevelPunishmentAttempted.clear();
+                }
+                else {
+                    for (auto* player : allPlayers) {
+                        if (player == nullptr) continue;
+                        const uint8_t playerId = player->fields.PlayerId;
+                        activePlayerIds.insert(playerId);
+                        if (player == localPlayer ||
+                            autoLevelPunishmentAttempted.contains(playerId)) continue;
+
+                        auto* playerData = GetPlayerDataById(playerId);
+                        if (playerData == nullptr || playerData->fields.Disconnected) continue;
+                        const uint64_t playerLevel = static_cast<uint64_t>(playerData->fields.PlayerLevel) + 1;
+                        if (playerLevel >= static_cast<uint64_t>(State.MinimumPlayerLevel)) continue;
+
+                        autoLevelPunishmentAttempted.insert(playerId);
+                        const bool ban = State.AutoBanBelowLevel;
+                        auto* outfit = GetPlayerOutfit(playerData);
+                        const std::string playerName = outfit != nullptr
+                            ? convert_from_string(outfit->fields.PlayerName)
+                            : "Player";
+                        app::InnerNetClient_KickPlayer(client, player->fields._.OwnerId, ban, NULL);
+                        Toasts::AddToast(
+                            ban ? "Auto Ban by Level" : "Auto Kick by Level",
+                            std::format("{} (level {}): {} request sent (minimum {}).",
+                                playerName,
+                                playerLevel,
+                                ban ? "Ban" : "Kick",
+                                State.MinimumPlayerLevel),
+                            ImVec4(1.f, 0.6f, 0.2f, 1.f));
+                    }
+
+                    for (auto it = autoLevelPunishmentAttempted.begin(); it != autoLevelPunishmentAttempted.end();) {
+                        if (!activePlayerIds.contains(*it)) it = autoLevelPunishmentAttempted.erase(it);
+                        else ++it;
+                    }
+                }
+            }
+        }
+        else {
+            autoLevelPunishmentAttempted.clear();
+            autoLevelPunishmentLobbyId = -1;
         }
         
         if (State.KickByLockedName) {

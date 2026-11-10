@@ -337,10 +337,10 @@ namespace SelfTab {
                 State.Save();
             }
             ImGui::SameLine();
-            if (ToggleButton("Read and Send SickoChat", &State.ReadAndSendSickoChat)) {
+            if (ToggleButton("Read and Send VLX Chat", &State.ReadAndSendSickoChat)) {
                 State.Save();
             }
-            if (State.ReadAndSendSickoChat) ImGui::Text("Send SickoChat messages in regular chat by typing \"/sc [message]\"!");
+            if (State.ReadAndSendSickoChat) ImGui::Text("Send VLX Chat messages in regular chat by typing \"/sc [message]\"!");
             /*static int framesPassed = 0;
             if (AnimatedButton("Refresh Chat Button")) {
                 State.RefreshChatButton = true;

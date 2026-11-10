@@ -24,7 +24,7 @@ namespace AboutTab {
         openCredits = group == Groups::Credits;
     }
 
-    const ImVec4 SickoCol = ImVec4(1.f, 0.f, 0.424f, 1.f);
+    const ImVec4 VlxCol = ImVec4(0.25f, 0.38f, 0.82f, 1.f);
     const ImVec4 RedCol = ImVec4(1.f, 0.f, 0.f, 1.0f);
     const ImVec4 AumCol = ImVec4(1.f, 0.3333f, 0.3333f, 1.0f);
     const ImVec4 GoldCol = ImVec4(1.f, 0.7333f, 0.f, 1.0f);
@@ -48,43 +48,42 @@ namespace AboutTab {
         if (openWelcome) {
             ImGui::Text(std::format("Welcome {}to ", State.HasOpenedMenuBefore ? "back " : "").c_str());
             ImGui::SameLine(0.0f, 0.0f);
-            ImGui::TextColored(SickoCol, "SickoMenu");
+            ImGui::TextColored(VlxCol, "VLX Menu");
             ImGui::SameLine(0.0f, 0.0f);
             if (State.SickoVersion.find("pr") != std::string::npos || State.SickoVersion.find("rc") != std::string::npos)
                 ImGui::TextColored(PreReleaseCol, std::format(" {}", State.SickoVersion).c_str());
             else
                 ImGui::TextColored(GoldCol, std::format(" {}", State.SickoVersion).c_str());
             ImGui::SameLine(0.0f, 0.0f);
-            ImGui::Text(" by ");
+            ImGui::Text(" - a fork of SickoMenu by ");
             ImGui::SameLine(0.0f, 0.0f);
             ImGui::TextColored(GoatCol, "g0aty");
             ImGui::SameLine(0.0f, 0.0f);
             ImGui::Text("!");
 
-            ImGui::TextColored(SickoCol, "SickoMenu");
+            ImGui::TextColored(VlxCol, "VLX Menu");
             ImGui::SameLine(0.0f, 0.0f);
-            ImGui::Text(" is a powerful utility for Among Us.");
-            ImGui::Text("It aims to improve the game experience for all players!");
-            ImGui::Text("Use the \"Check for Updates\" button to download the latest release!");
-            if (ColoredButton(DevCol, "GitHub")) {
+            ImGui::Text(" is a customized build of SickoMenu.");
+            ImGui::Text("Upstream project links and contributor credits are preserved below.");
+            if (ColoredButton(DevCol, "Upstream GitHub")) {
                 OpenLink("https://github.com/g0aty/SickoMenu");
             }
             ImGui::SameLine();
-            if (ColoredButton(GoldCol, "Check for Updates")) {
+            if (ColoredButton(GoldCol, "Upstream Releases")) {
                 OpenLink("https://github.com/g0aty/SickoMenu/releases/latest");
             }
             ImGui::SameLine();
-            if (ColoredButton(State.RgbColor, "Donate")) {
+            if (ColoredButton(State.RgbColor, "Support Upstream")) {
                 OpenLink("https://ko-fi.com/g0aty");
             }
-            ImGui::Text("Join the Discord server for support, bug reports, and sneak peeks!");
-            if (ColoredButton(ContributorCol, "Join our Discord!")) {
+            ImGui::Text("The original community and support links are here:");
+            if (ColoredButton(ContributorCol, "Original Discord")) {
                 OpenLink("https://dsc.gg/sickos"); //SickoMenu discord invite
             }
 
-            ImGui::TextColored(SickoCol, "SickoMenu");
+            ImGui::TextColored(VlxCol, "VLX Menu");
             ImGui::SameLine(0.0f, 0.0f);
-            ImGui::Text(" is free and open-source software.");
+            ImGui::Text(" is a fork of the free and open-source SickoMenu project.");
 
             if (State.SickoVersion.find("pr") != std::string::npos || State.SickoVersion.find("rc") != std::string::npos) {
                 if (State.SickoVersion.find("pr") != std::string::npos) ImGui::TextColored(State.RgbColor, "You have access to pre-releases, enjoy!");
@@ -94,8 +93,7 @@ namespace AboutTab {
             }
             else {
                 ImGui::TextColored(ImVec4(1.f, 0.f, 0.f, 1.f), "If you've paid for this menu, demand a refund immediately.");
-                BoldText("Make sure you have downloaded the latest version of SickoMenu from GitHub or our", ImVec4(0.f, 1.f, 0.f, 1.f));
-                BoldText("official Discord!", ImVec4(0.f, 1.f, 0.f, 1.f));
+                BoldText("For upstream releases and support, use the original GitHub and Discord links above.", ImVec4(0.f, 1.f, 0.f, 1.f));
             }
             //hopefully stop people from reselling a foss menu for actual money
 
@@ -116,7 +114,7 @@ namespace AboutTab {
         }
 
         if (openCredits) {
-            ImGui::TextColored(SickoCol, "SickoMenu");
+            ImGui::TextColored(VlxCol, "SickoMenu");
             ImGui::SameLine(0.0f, 0.0f);
             ImGui::Text(" is a fork of");
             ImGui::SameLine(0.0f, 0.0f);
@@ -220,7 +218,7 @@ namespace AboutTab {
 
             ImGui::Text("Thank you for making ");
             ImGui::SameLine(0.0f, 0.0f);
-            ImGui::TextColored(SickoCol, "SickoMenu");
+            ImGui::TextColored(VlxCol, "SickoMenu");
             ImGui::SameLine(0.0f, 0.0f);
             ImGui::Text(" possible!");
         }

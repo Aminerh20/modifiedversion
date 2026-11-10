@@ -443,6 +443,27 @@ namespace HostTab {
                 if (ToggleButton("Enable Moderation System", &State.Mod_EnableModeration))
                     State.Save();
 
+                if (IsInLobby()) {
+                    ImGui::Separator();
+                    ImGui::Text("Minimum Player Level");
+                    State.MinimumPlayerLevel = std::clamp(State.MinimumPlayerLevel, 1, 100000);
+                    ImGui::SetNextItemWidth(120.f * State.dpiScale);
+                    if (ImGui::InputInt("Level threshold", &State.MinimumPlayerLevel)) {
+                        State.MinimumPlayerLevel = std::clamp(State.MinimumPlayerLevel, 1, 100000);
+                        State.Save();
+                    }
+                    if (ToggleButton("Auto Kick Below Level", &State.AutoKickBelowLevel)) {
+                        if (State.AutoKickBelowLevel) State.AutoBanBelowLevel = false;
+                        State.Save();
+                    }
+                    if (ToggleButton("Auto Ban Below Level", &State.AutoBanBelowLevel)) {
+                        if (State.AutoBanBelowLevel) State.AutoKickBelowLevel = false;
+                        State.Save();
+                    }
+                    ImGui::TextDisabled("Applies to players below level %d while you host this lobby.",
+                        State.MinimumPlayerLevel);
+                }
+
                 if (ToggleButton("Always Allow Start Button", &State.AlwaysAllowStart))
                     State.Save();
 

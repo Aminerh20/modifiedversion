@@ -578,10 +578,10 @@ public:
 
     bool LightMode = false;
     bool CustomGameTheme = false;
-    ImVec4 MenuThemeColor = ImVec4(1.f, 0.f, 0.424f, 1.f);
-    ImVec4 MenuGradientColor = ImVec4(1.f, 0.f, 0.424f, 1.f);
-    ImVec4 MenuGradientColor1 = ImVec4(1.f, 0.f, 0.424f, 1.f);
-    ImVec4 MenuGradientColor2 = ImVec4(1.f, 0.f, 0.424f, 1.f);
+    ImVec4 MenuThemeColor = ImVec4(0.25f, 0.38f, 0.82f, 1.f);
+    ImVec4 MenuGradientColor = ImVec4(0.25f, 0.38f, 0.82f, 1.f);
+    ImVec4 MenuGradientColor1 = ImVec4(0.25f, 0.38f, 0.82f, 1.f);
+    ImVec4 MenuGradientColor2 = ImVec4(0.48f, 0.30f, 0.82f, 1.f);
     ImVec4 RgbColor = ImVec4(1.f, 0.071f, 0.f, 1.f);
     ImVec4 SelectedColor = ImVec4(1.f, 1.f, 1.f, 0.75f);
     ImVec4 SelectedReplayMapColor = ImVec4(1.f, 1.f, 1.f, 0.75f);
@@ -851,6 +851,9 @@ public:
     bool Ban_IgnoreWhitelist = true;
     bool BanEveryone = false;
     bool KickEveryone = false;
+    bool AutoKickBelowLevel = false;
+    bool AutoBanBelowLevel = false;
+    int MinimumPlayerLevel = 10;
     bool KickAFK = false;
     float AutoPunishDelay = 0.f;
     bool NotificationsAFK = false;

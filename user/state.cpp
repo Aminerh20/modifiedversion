@@ -83,6 +83,16 @@ void Settings::Load() {
         JSON_TRYGET("MenuGradientColor2_G", this->MenuGradientColor2.y);
         JSON_TRYGET("MenuGradientColor2_B", this->MenuGradientColor2.z);
         JSON_TRYGET("MenuGradientColor2_A", this->MenuGradientColor2.w);
+        const auto updateLegacyAccent = [](ImVec4& color) {
+            if (color.x == 1.f && color.y == 0.f && color.z == 0.424f) {
+                color.x = 0.25f;
+                color.y = 0.38f;
+                color.z = 0.82f;
+            }
+        };
+        updateLegacyAccent(this->MenuThemeColor);
+        updateLegacyAccent(this->MenuGradientColor1);
+        updateLegacyAccent(this->MenuGradientColor2);
         JSON_TRYGET("UnlockCosmetics", this->UnlockCosmetics);
         JSON_TRYGET("GameFPS", this->GameFPS);
         JSON_TRYGET("KeybindsWhileChatting", this->KeybindsWhileChatting);
@@ -553,6 +563,9 @@ void Settings::Load() {
 
         JSON_TRYGET("Destruct_IgnoreWhitelist", this->Destruct_IgnoreWhitelist);
         JSON_TRYGET("Ban_IgnoreWhitelist", this->Ban_IgnoreWhitelist);
+        JSON_TRYGET("AutoKickBelowLevel", this->AutoKickBelowLevel);
+        JSON_TRYGET("AutoBanBelowLevel", this->AutoBanBelowLevel);
+        JSON_TRYGET("MinimumPlayerLevel", this->MinimumPlayerLevel);
         JSON_TRYGET("TimerAFK", this->TimerAFK);
         JSON_TRYGET("AddExtraTime", this->AddExtraTime);
         JSON_TRYGET("ExtraTimeThreshold", this->ExtraTimeThreshold);
@@ -1254,6 +1267,9 @@ void Settings::Save() {
                 { "SMAC_StartWords", this->SMAC_StartWords },
                 { "Destruct_IgnoreWhitelist", this->Destruct_IgnoreWhitelist },
                 { "Ban_IgnoreWhitelist", this->Ban_IgnoreWhitelist },
+                { "AutoKickBelowLevel", this->AutoKickBelowLevel },
+                { "AutoBanBelowLevel", this->AutoBanBelowLevel },
+                { "MinimumPlayerLevel", this->MinimumPlayerLevel },
                 { "TimerAFK", this->TimerAFK },
                 { "AddExtraTime", this->AddExtraTime },
                 { "ExtraTimeThreshold", this->ExtraTimeThreshold },

@@ -532,7 +532,7 @@ namespace GameTab {
                     }
                 }
                 if ((IsInGame() || IsInLobby()) && State.ReadAndSendSickoChat) ImGui::SameLine();
-                if (State.ReadAndSendSickoChat && (IsInGame() || IsInLobby()) && AnimatedButton("Send SickoChat"))
+                if (State.ReadAndSendSickoChat && (IsInGame() || IsInLobby()) && AnimatedButton("Send VLX Chat"))
                 {
                     auto player = (!State.SafeMode && State.playerToChatAs.has_value()) ?
                         State.playerToChatAs.validate().get_PlayerControl() : *Game::pLocalPlayer;

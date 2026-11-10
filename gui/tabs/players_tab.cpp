@@ -508,7 +508,7 @@ namespace PlayersTab {
                             else if (localData && PlayerIsImpostor(localData) && PlayerIsImpostor(playerData))
                                 tempColor = AmongUsColorToImVec4(Palette__TypeInfo->static_fields->ImpostorRoleRed);
                             else if ((playerCtrl == *Game::pLocalPlayer && State.ModDetection) || State.modUsers.count(pid)) {
-                                std::string modName = State.modUsers.count(pid) ? RemoveHtmlTags(State.modUsers.at(pid)[0]) : "SickoMenu";
+                                std::string modName = State.modUsers.count(pid) ? RemoveHtmlTags(State.modUsers.at(pid)[0]) : "VLX Menu";
                                 if (modName == "KillNetwork")
                                     tempColor = AmongUsColorToImVec4(Palette__TypeInfo->static_fields->ImpostorRed);
                                 else if (modName == "BetterAmongUs")
@@ -521,8 +521,8 @@ namespace PlayersTab {
                                     tempColor = AmongUsColorToImVec4(Palette__TypeInfo->static_fields->Purple);
                                 else if (modName == "Unknown")
                                     tempColor = AmongUsColorToImVec4(Palette__TypeInfo->static_fields->DisabledGrey);
-                                else if (modName == "SickoMenu")
-                                    tempColor = ImVec4(1.f, 0.f, 0.424f, 1.f);
+                                else if (modName == "SickoMenu" || modName == "VLX Menu")
+                                    tempColor = State.MenuThemeColor;
                                 else if (modName == "SlopMenuCrew")
                                     tempColor = ImVec4(0.744f, 0.855f, 0.1227f, 1.f);
                             }
@@ -759,7 +759,7 @@ namespace PlayersTab {
                     if (!selectedPlayer.get_PlayerControl()->fields.notRealPlayer && selectedPlayer.get_PlayerData() != NULL) {
                         bool isUsingMod = (selectedPlayer.is_LocalPlayer() && State.ModDetection) || State.modUsers.count(selectedPid);
                         ImGui::Text("Is using Modified Client: %s", isUsingMod ? "Yes" : "No");
-                        if (isUsingMod) ImGui::Text("Mod Name: %s", selectedPlayer.is_LocalPlayer() ? "SickoMenu" : RemoveHtmlTags(State.modUsers.at(selectedPid)[0]).c_str());
+                        if (isUsingMod) ImGui::Text("Mod Name: %s", selectedPlayer.is_LocalPlayer() ? "VLX Menu" : RemoveHtmlTags(State.modUsers.at(selectedPid)[0]).c_str());
                         if (isUsingMod && ((selectedPlayer.is_LocalPlayer() && State.ModDetection) || !State.modUsers.at(selectedPid)[1].empty()))
                             ImGui::Text("Mod Version: %s", selectedPlayer.is_LocalPlayer() ? State.SickoVersion.c_str() : RemoveHtmlTags(State.modUsers.at(selectedPid)[1]).c_str());
 
@@ -2163,7 +2163,7 @@ namespace PlayersTab {
                         ImGui::SameLine();*/
                         if (!State.SafeMode) {
                             static std::string scMessage = "";
-                            if (AnimatedButton("Force SickoChat")) {
+                            if (AnimatedButton("Force VLX Chat")) {
                                 if (IsInGame()) State.rpcQueue.push(new RpcForceSickoChat(selectedPlayer, scMessage, !State.SafeMode));
                                 if (IsInLobby()) State.lobbyRpcQueue.push(new RpcForceSickoChat(selectedPlayer, scMessage, !State.SafeMode));
                             }

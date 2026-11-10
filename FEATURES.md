@@ -132,6 +132,7 @@
 - Remove Map
 - Ban Everyone
 - Kick Everyone
+- Auto Kick/Ban by Minimum Level
 - Kick AFK Players
 - Enable AFK Notifications
 - Whitelisted Players Only

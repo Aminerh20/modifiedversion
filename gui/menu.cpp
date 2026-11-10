@@ -50,7 +50,7 @@ namespace Menu {
 			{"Config", "General"}, {"Auto-Exit Due To Low FPS", "General"}, {"Minimum FPS", "General"}, 
 			{"Set As Account Name", "General"}, {"Set Name", "General"}, {"Automatically Set Name", "General"}, 
 			{"Custom Code", "General"}, {"Replace Streamer Mode Lobby Code", "General"}, {"RGB Lobby Code", "General"},  
-			{"Unlock Cosmetics", "General"}, {"Unlock All Achievements", "General"}, {"Allow other mod users to see you're using SickoMenu", "General"}, 
+			{"Unlock Cosmetics", "General"}, {"Unlock All Achievements", "General"}, {"Broadcast compatible mod version", "General"},
 			{"Spoof Guest Account (Quick Chat ONLY)", "Spoofing"}, {"Use Custom Friend Code (For New/Guest Account ONLY)", "Spoofing"}, {"Spoof Level", "Spoofing"},
 			{"Spoof Platform", "Spoofing"}, {"Spoof PSN Platform ID", "Spoofing"},
 			{"Spoof Platform Name", "Spoofing"}, {"Custom Server Settings", "Spoofing"}, {"Force DTLS", "Spoofing"},
@@ -91,7 +91,7 @@ namespace Menu {
 			{"Attempt to Ban Everyone", "General"}, {"Kill All Crewmates", "General"},
 			{"Kill All Impostors", "General"}, {"Kick Everyone From Vents", "General"},
 			{"End Meeting", "General"},
-			{"Chat Message", "Chat"}, {"Send", "Chat"}, {"Send SickoChat", "Chat"}, {"Spam", "Chat"},
+			{"Chat Message", "Chat"}, {"Send", "Chat"}, {"Send VLX Chat", "Chat"}, {"Spam", "Chat"},
 			{"Chat Presets", "Chat"}, {"Ignore Whitelisted Players [Ban/Kick]", "Utils"},
 			{"Attempt to Crash Lobby", "Utils"}, {"Make Players Spawn at Random Vents", "Utils"},
 			{"Enable Anticheat (SMAC)", "Anticheat"},
@@ -111,7 +111,7 @@ namespace Menu {
 			{"Zoom", "Visuals"},
 			{"Scroll to Zoom / Shift + Scroll to Change Freecam Speed", "Visuals"}, {"Smooth Zoom", "Visuals"}, {"Show Shadows While Zoomed", "Visuals"},
 			{"Always show Chat Button", "Visuals"}, {"Allow Ctrl+(C/V) in Chat", "Visuals"},
-			{"Read Messages by Ghosts", "Visuals"}, {"Read and Send SickoChat", "Visuals"},
+			{"Read Messages by Ghosts", "Visuals"}, {"Read and Send VLX Chat", "Visuals"},
 			{"Move Match Info Guide HUD Button", "Visuals"}, {"Custom Name", "Visuals"},
 			{"Custom Name for Everyone", "Visuals"}, {"Reveal Roles", "Visuals"},
 			{"Localize Role Names", "Visuals"}, {"Abbreviate Role Names", "Visuals"},
@@ -370,8 +370,8 @@ namespace Menu {
 		try {
 			if (!init)
 				Menu::Init();
-			std::string modText = std::format("SickoMenu {}", State.SickoVersion);
-			ImGui::Begin("SickoMenu", &State.ShowMenu, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollWithMouse);
+			std::string modText = std::format("VLX Menu {}", State.SickoVersion);
+			ImGui::Begin("VLX Menu", &State.ShowMenu, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollWithMouse);
 			static ImVec4 titleCol = State.MenuThemeColor;
 			if (State.RgbMenuTheme)
 				titleCol = State.RgbColor;
@@ -396,7 +396,7 @@ namespace Menu {
 			ImGui::SameLine(ImGui::GetWindowWidth() - 19 * State.dpiScale);
 			if (ImGui::Button("-")) State.ShowMenu = false; //minimize button
 			//ImGui::BeginTabBar("AmongUs#TopBar", ImGuiTabBarFlags_NoTabListScrollingButtons);
-			ImGui::BeginChild("###SickoMenu", ImVec2(90 * State.dpiScale, 0), true, ImGuiWindowFlags_NoBackground);
+			ImGui::BeginChild("###VLXMenu", ImVec2(90 * State.dpiScale, 0), true, ImGuiWindowFlags_NoBackground);
 			// Search field
 			ImGui::SetNextItemWidth(70 * State.dpiScale); // Adjust the width of the input box
 			if (InputStringWithHint("##Search", "Search...", &State.searchQuery)/* && State.AprilFoolsMode*/) {

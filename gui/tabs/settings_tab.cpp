@@ -289,7 +289,7 @@ namespace SettingsTab {
 					State.unlockAllAchievements = true;
 			}
 
-			if (ToggleButton("Allow other mod users to see you're using SickoMenu", &State.ModDetection)) State.Save();
+			if (ToggleButton("Broadcast compatible mod version", &State.ModDetection)) State.Save();
 			/*ImGui::SameLine();
 			if (CustomListBoxInt(" ", &State.BroadcastedMod, MODS, 100.f * State.dpiScale)) State.Save();*/
 		}
@@ -552,7 +552,9 @@ namespace SettingsTab {
 			ImGui::SameLine();
 			if (AnimatedButton("Reset Menu Theme"))
 			{
-				State.MenuThemeColor = ImVec4(1.f, 0.f, 0.424f, State.MenuThemeColor.w);
+				State.MenuThemeColor = ImVec4(0.25f, 0.38f, 0.82f, State.MenuThemeColor.w);
+				State.MenuGradientColor1 = ImVec4(0.25f, 0.38f, 0.82f, State.MenuThemeColor.w);
+				State.MenuGradientColor2 = ImVec4(0.48f, 0.30f, 0.82f, State.MenuThemeColor.w);
 				State.GradientMenuTheme = false;
 				State.RgbMenuTheme = false;
 				State.MatchBackgroundWithTheme = false;
