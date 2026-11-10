@@ -1084,7 +1084,7 @@ void dInnerNetClient_Update(InnerNetClient* __this, MethodInfo* method) {
             }
             else {
                 auto* client = (InnerNetClient*)(*Game::pAmongUsClient);
-                const int32_t lobbyId = client->fields._.GameId;
+                const int32_t lobbyId = client->fields.GameId;
                 State.MinimumPlayerLevel = std::clamp(State.MinimumPlayerLevel, 1, 100000);
                 if (lobbyId != autoLevelPunishmentLobbyId) {
                     autoLevelPunishmentAttempted.clear();
