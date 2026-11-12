@@ -1025,12 +1025,12 @@ namespace PlayersTab {
                                 }
                             }
                         }
-                        else if (IsInGame() && (!selectedPlayer.is_Host() || selectedPlayers.size() != 1)) {
+                        else if (IsInGame()) {
                             if (AnimatedButton("Attempt to Ban")) {
                                 for (auto p : selectedPlayers) {
                                     if (p.has_value() && p.validate().is_LocalPlayer()) continue;
                                     if (p.has_value() &&
-                                        p.validate().get_PlayerControl()->fields._.NetId == hostId) continue;
+                                        false) continue;
                                     State.rpcQueue.push(new AttemptToBan(p.validate().get_PlayerControl()));
                                 }
                             }
