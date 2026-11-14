@@ -50,6 +50,7 @@ namespace PlayersTab {
         AwaitingLobby,
         AwaitingRejoin,
         LobbyDelay,
+        WaitingForParticipants,
         EvaluateLobby,
     };
 
@@ -74,11 +75,15 @@ namespace PlayersTab {
     static std::unordered_map<Game::PlayerId, XpTrackedPlayer> xpTrackedPlayers;
     static std::chrono::steady_clock::time_point xpControllerDeadline;
     static std::chrono::steady_clock::time_point xpLastRosterCheck;
+    static std::chrono::steady_clock::time_point xpTransitionGraceDeadline;
+    static std::chrono::steady_clock::time_point xpParticipantWaitStarted;
+    static XpControllerStage xpStageBeforeParticipantWait = XpControllerStage::PreparingRound;
     static constexpr auto xpRoundPrepareDelay = std::chrono::seconds(1);
     static constexpr auto xpFarmingDuration = std::chrono::seconds(180);
     static constexpr auto xpRolloverDuration = std::chrono::seconds(35);
     static constexpr auto xpRejoinWindow = std::chrono::seconds(30);
     static constexpr auto xpLobbyDelay = std::chrono::seconds(20);
+    static constexpr auto transitionGraceDuration = std::chrono::seconds(10);
     static constexpr auto xpStageTimeout = std::chrono::seconds(60);
     static constexpr auto xpRosterCheckInterval = std::chrono::milliseconds(70);
 
@@ -95,7 +100,7 @@ namespace PlayersTab {
     static int GetMatchCycleTeamCap(size_t nonHostParticipants) {
         if (nonHostParticipants >= 7) return 3;
         if (nonHostParticipants >= 4) return 2;
-        if (nonHostParticipants >= 2) return 1;
+        if (nonHostParticipants >= 1) return 1;
         return 0;
     }
 
@@ -296,6 +301,19 @@ namespace PlayersTab {
         return true;
     }
 
+    static void PauseForNonHostParticipants(std::chrono::steady_clock::time_point now) {
+        if (xpControllerStage == XpControllerStage::WaitingForParticipants) return;
+        xpStageBeforeParticipantWait = xpControllerStage;
+        xpControllerStage = XpControllerStage::WaitingForParticipants;
+        xpParticipantWaitStarted = now;
+    }
+
+    static void ResumeAfterNonHostParticipantReturns(std::chrono::steady_clock::time_point now) {
+        xpControllerDeadline += now - xpParticipantWaitStarted;
+        xpControllerStage = xpStageBeforeParticipantWait;
+        xpLastRosterCheck = now;
+    }
+
     static void StopXpController(const std::string& reason, bool showToast = true) {
         if (!IsXpControllerRunning()) return;
         xpControllerPhase = XpControllerPhase::STOPPED;
@@ -314,8 +332,8 @@ namespace PlayersTab {
         const auto players = GetConnectedXpPlayers();
         const size_t participantCount = GetConnectedNonHostCount();
         const int teamCap = GetMatchCycleTeamCap(participantCount);
-        if (players.empty() || participantCount < 2 || teamCap == 0) {
-            StopXpController("At least two connected non-host participants are required.");
+        if (participantCount == 0 || players.empty()) {
+            PauseForNonHostParticipants(std::chrono::steady_clock::now());
             return false;
         }
 
@@ -481,9 +499,21 @@ namespace PlayersTab {
         GameManager_RpcEndGame(gameManager, GameOverReason__Enum(0), false, NULL);
         xpControllerStage = XpControllerStage::AwaitingLobby;
         xpControllerDeadline = std::chrono::steady_clock::now() + xpStageTimeout;
+        xpTransitionGraceDeadline = std::chrono::steady_clock::now() + transitionGraceDuration;
     }
 
     static void HandleXpRoundReturnedToLobby() {
+        xpControllerStage = XpControllerStage::LobbyDelay;
+        xpControllerDeadline = std::chrono::steady_clock::now() + xpLobbyDelay;
+    }
+
+    static void ProcessXpLobbyDelay() {
+        if (GetConnectedNonHostCount() == 0) {
+            PauseForNonHostParticipants(std::chrono::steady_clock::now());
+            return;
+        }
+
+        SynchronizeXpPlayers();
         if (xpControllerPhase == XpControllerPhase::FARMING_ROUND) {
             FindXpLevelUps(true);
             xpControllerPhase = XpControllerPhase::LOBBY_EVAL;
@@ -505,8 +535,11 @@ namespace PlayersTab {
             return;
         }
 
-        xpControllerStage = XpControllerStage::LobbyDelay;
-        xpControllerDeadline = std::chrono::steady_clock::now() + xpLobbyDelay;
+        if (AllConnectedPlayersCompletedRollover()) {
+            StopXpController("All connected players completed their XP rollover.");
+            return;
+        }
+        BeginXpRolloverRound();
     }
 
     void StartXpController() {
@@ -544,6 +577,7 @@ namespace PlayersTab {
 
         xpControllerPhase = XpControllerPhase::FARMING_ROUND;
         xpLastRosterCheck = std::chrono::steady_clock::now();
+        xpTransitionGraceDeadline = xpLastRosterCheck;
         BeginXpFarmingRound();
         Toasts::AddToast("XP Controller", "Starting the farming rounds.", ImVec4(0.f, 1.f, 0.5f, 1.f));
     }
@@ -577,16 +611,34 @@ namespace PlayersTab {
             StopXpController("Stopped because host authority was lost.");
             return;
         }
-        if (GetConnectedNonHostCount() < 2) {
-            StopXpController("Stopped because fewer than two non-host participants remain.");
+        const auto now = std::chrono::steady_clock::now();
+        const bool inLobby = IsInLobby();
+        const bool transitioningToLobby = inLobby
+            && (xpControllerStage == XpControllerStage::MatchTimer
+                || xpControllerStage == XpControllerStage::AwaitingLobby);
+        const bool lobbyDelayPending = inLobby
+            && xpControllerStage == XpControllerStage::LobbyDelay
+            && now < xpControllerDeadline;
+
+        if (xpControllerStage == XpControllerStage::WaitingForParticipants) {
+            if (!inLobby) return;
+            if (now < xpTransitionGraceDeadline || GetConnectedNonHostCount() == 0) return;
+            ResumeAfterNonHostParticipantReturns(now);
+        }
+        else if (inLobby && !transitioningToLobby && !lobbyDelayPending
+            && now >= xpTransitionGraceDeadline && GetConnectedNonHostCount() == 0) {
+            PauseForNonHostParticipants(now);
             return;
         }
 
-        SynchronizeXpPlayers();
-        const auto now = std::chrono::steady_clock::now();
+        if (!transitioningToLobby && !lobbyDelayPending) {
+            SynchronizeXpPlayers();
+        }
         if (now - xpLastRosterCheck >= xpRosterCheckInterval) {
-            xpLastRosterCheck = now;
-            ReconcileMatchCycleShields();
+            if (!transitioningToLobby && !lobbyDelayPending) {
+                xpLastRosterCheck = now;
+                ReconcileMatchCycleShields();
+            }
         }
         switch (xpControllerStage) {
         case XpControllerStage::PreparingRound:
@@ -626,17 +678,10 @@ namespace PlayersTab {
             break;
         case XpControllerStage::LobbyDelay:
             if (now >= xpControllerDeadline) {
-                if (!AllConnectedPlayersEarnedXp()) {
-                    xpControllerPhase = XpControllerPhase::LOBBY_EVAL;
-                    xpControllerStage = XpControllerStage::EvaluateLobby;
-                }
-                else if (AllConnectedPlayersCompletedRollover()) {
-                    StopXpController("All connected players completed their XP rollover.");
-                }
-                else {
-                    BeginXpRolloverRound();
-                }
+                ProcessXpLobbyDelay();
             }
+            break;
+        case XpControllerStage::WaitingForParticipants:
             break;
         case XpControllerStage::EvaluateLobby:
             BroadcastXpControllerSummary();
