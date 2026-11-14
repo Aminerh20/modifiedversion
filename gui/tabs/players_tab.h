@@ -40,6 +40,8 @@ namespace PlayersTab {
 	void StartXpController();
 	void StopXpController();
 	bool IsXpControllerRunning();
+	int GetXpFarmingDurationSeconds();
+	void SetXpFarmingDurationSeconds(int seconds);
 	void TickXpController();
 	std::string GetXpControllerStatus();
 	void TickKillLoop();

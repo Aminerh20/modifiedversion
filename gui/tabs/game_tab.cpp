@@ -217,6 +217,13 @@ namespace GameTab {
                 ImGui::Separator();
                 ImGui::Dummy(ImVec2(7, 7) * State.dpiScale);
 
+                int farmingDurationSeconds = PlayersTab::GetXpFarmingDurationSeconds();
+                ImGui::SetNextItemWidth(180 * State.dpiScale);
+                if (ImGui::InputInt("Farm round seconds", &farmingDurationSeconds)) {
+                    PlayersTab::SetXpFarmingDurationSeconds(farmingDurationSeconds);
+                }
+                ImGui::TextDisabled("Applies to upcoming farming rounds (1-3600 seconds).");
+
                 if (!PlayersTab::IsXpControllerRunning()) {
                     if (AnimatedButton("Start Match Cycle")) {
                         PlayersTab::StartXpController();
@@ -229,7 +236,7 @@ namespace GameTab {
                     const std::string status = PlayersTab::GetXpControllerStatus();
                     ImGui::TextWrapped("%s", status.c_str());
                 }
-                ImGui::TextDisabled("Host only - a round with no level increase marks that player complete.");
+                ImGui::TextDisabled("Host only - farming completes players with no level increase; drain restarts farming when no one levels up.");
                 ImGui::TextDisabled("Cycle diagnostics: SickoMenu/sicko-log.txt");
             }
 

@@ -81,7 +81,7 @@ namespace PlayersTab {
     static std::chrono::steady_clock::time_point xpHostAuthorityLostAt;
     static XpControllerStage xpStageBeforeParticipantWait = XpControllerStage::PreparingRound;
     static constexpr auto xpRoundPrepareDelay = std::chrono::seconds(1);
-    static constexpr auto xpFarmingDuration = std::chrono::seconds(180);
+    static int xpFarmingDurationSeconds = 180;
     static constexpr auto xpRolloverDuration = std::chrono::seconds(35);
     static constexpr auto xpRejoinWindow = std::chrono::seconds(30);
     static constexpr auto xpLobbyDelay = std::chrono::seconds(20);
@@ -255,16 +255,22 @@ namespace PlayersTab {
     }
 
     static void BroadcastXpControllerSummary() {
-        std::vector<std::string> completed;
-        std::vector<std::string> continueFarming;
-        for (auto player : GetConnectedXpPlayers()) {
-            const auto playerId = player->fields.PlayerId;
-            auto it = xpTrackedPlayers.find(playerId);
-            if (it == xpTrackedPlayers.end() || it->second.is_host) continue;
-            (it->second.has_completed_objective ? completed : continueFarming).push_back(XpPlayerName(player));
+        std::vector<Game::PlayerId> participantIds;
+        participantIds.reserve(xpTrackedPlayers.size());
+        for (const auto& [playerId, tracked] : xpTrackedPlayers) {
+            if (!tracked.is_host) participantIds.push_back(playerId);
         }
-        BroadcastXpControllerPlayerList("No level increase (complete):", completed);
-        BroadcastXpControllerPlayerList("Level increased (continue farming):", continueFarming);
+        std::sort(participantIds.begin(), participantIds.end());
+
+        std::vector<std::string> farmedThisRound;
+        std::vector<std::string> stillNeedFarming;
+        for (const auto playerId : participantIds) {
+            const auto& tracked = xpTrackedPlayers.at(playerId);
+            if (tracked.is_impostor) farmedThisRound.push_back(tracked.name);
+            if (!tracked.has_completed_objective) stillNeedFarming.push_back(tracked.name);
+        }
+        BroadcastXpControllerPlayerList("Farmed this round:", farmedThisRound);
+        BroadcastXpControllerPlayerList("Still need farming:", stillNeedFarming);
     }
 
     static void SynchronizeXpPlayers() {
@@ -312,8 +318,9 @@ namespace PlayersTab {
         }
     }
 
-    static std::vector<Game::PlayerId> FindXpLevelUps(bool farmingRound) {
-        std::vector<Game::PlayerId> levelUps;
+    static std::vector<Game::PlayerId> EvaluateXpProgress(bool farmingRound, bool* anyLevelIncrease = nullptr) {
+        std::vector<Game::PlayerId> rejoinRequests;
+        if (anyLevelIncrease != nullptr) *anyLevelIncrease = false;
         for (auto player : GetConnectedXpPlayers()) {
             auto data = GetPlayerData(player);
             if (data == nullptr) continue;
@@ -323,6 +330,9 @@ namespace PlayersTab {
             auto& tracked = it->second;
             const bool leveledUp = tracked.has_match_snapshot
                 && data->fields.PlayerLevel > tracked.level_at_match_start;
+            if (leveledUp && !IsMatchCycleHost(player) && anyLevelIncrease != nullptr) {
+                *anyLevelIncrease = true;
+            }
             tracked.is_host = IsMatchCycleHost(player);
             if (tracked.is_host) continue;
 
@@ -330,19 +340,20 @@ namespace PlayersTab {
                 tracked.has_earned_xp = !leveledUp;
                 tracked.has_completed_objective = !leveledUp;
             }
-            else {
+            else if (!tracked.rollover_complete) {
                 if (leveledUp) {
-                    tracked.rollover_complete = false;
+                    tracked.rollover_complete = true;
+                    tracked.needs_rejoin = false;
+                    tracked.disconnected_after_rejoin_request = false;
+                }
+                else {
                     tracked.needs_rejoin = true;
                     tracked.disconnected_after_rejoin_request = false;
-                    levelUps.push_back(player->fields.PlayerId);
-                }
-                else if (!tracked.rollover_complete) {
-                    tracked.rollover_complete = true;
+                    rejoinRequests.push_back(player->fields.PlayerId);
                 }
             }
         }
-        return levelUps;
+        return rejoinRequests;
     }
 
     static bool AllConnectedPlayersEarnedXp() {
@@ -463,6 +474,12 @@ namespace PlayersTab {
         for (auto player : impostors) {
             xpTrackedPlayers[player->fields.PlayerId].has_farming_attempt = true;
         }
+        for (auto& entry : xpTrackedPlayers) {
+            entry.second.is_impostor = false;
+        }
+        for (auto player : impostors) {
+            xpTrackedPlayers[player->fields.PlayerId].is_impostor = true;
+        }
         LogXpControllerEvent(std::format(
             "Configuring teams: phase={}, connectedPlayers={}, connectedNonHost={}, attackerCap={}, attackersSelected={}, shieldCap={}.",
             XpControllerPhaseName(xpControllerPhase), players.size(), participantCount, teamCap, impostors.size(), teamCap));
@@ -480,7 +497,7 @@ namespace PlayersTab {
             if (!tracked.is_impostor && data != nullptr && !data->fields.IsDead) defenders.push_back(player);
         }
         std::stable_sort(defenders.begin(), defenders.end(), [](PlayerControl* left, PlayerControl* right) {
-            return IsMatchCycleHost(left) && !IsMatchCycleHost(right);
+            return !IsMatchCycleHost(left) && IsMatchCycleHost(right);
         });
 
         std::vector<Game::PlayerId> desiredShields;
@@ -522,7 +539,7 @@ namespace PlayersTab {
             eligibleDefenders.push_back(player);
         }
         std::stable_sort(eligibleDefenders.begin(), eligibleDefenders.end(), [](PlayerControl* left, PlayerControl* right) {
-            return IsMatchCycleHost(left) && !IsMatchCycleHost(right);
+            return !IsMatchCycleHost(left) && IsMatchCycleHost(right);
         });
 
         std::vector<Game::PlayerId> desiredShields;
@@ -636,43 +653,74 @@ namespace PlayersTab {
             const auto priorCompleted = std::count_if(xpTrackedPlayers.begin(), xpTrackedPlayers.end(), [](const auto& entry) {
                 return !entry.second.is_host && entry.second.has_completed_objective;
             });
-            FindXpLevelUps(true);
+            EvaluateXpProgress(true);
             const auto completed = std::count_if(xpTrackedPlayers.begin(), xpTrackedPlayers.end(), [](const auto& entry) {
                 return !entry.second.is_host && entry.second.has_completed_objective;
             });
             LogXpControllerEvent(std::format(
-                "Farming XP evaluation: participants={}, completedBefore={}, completedAfter={}, level-up means continue farming.",
+                "Farming XP evaluation: participants={}, completedBefore={}, completedAfter={}, no level increase means farming complete.",
                 GetConnectedNonHostCount(), priorCompleted, completed));
             xpControllerPhase = XpControllerPhase::LOBBY_EVAL;
             xpControllerStage = XpControllerStage::EvaluateLobby;
             return;
         }
 
-        const auto levelUps = FindXpLevelUps(false);
-        if (!levelUps.empty()) {
+        bool anyLevelIncrease = false;
+        const auto rejoinRequests = EvaluateXpProgress(false, &anyLevelIncrease);
+        if (!anyLevelIncrease) {
+            std::vector<std::string> participantNames;
+            for (auto& [playerId, tracked] : xpTrackedPlayers) {
+                if (tracked.is_host) continue;
+                tracked.has_earned_xp = false;
+                tracked.has_completed_objective = false;
+                tracked.rollover_complete = false;
+                tracked.has_farming_attempt = false;
+                tracked.needs_rejoin = false;
+                tracked.disconnected_after_rejoin_request = false;
+                if (tracked.connected) participantNames.push_back(tracked.name);
+            }
+            std::sort(participantNames.begin(), participantNames.end());
+            BroadcastXpControllerPlayerList("Drain complete; restarting farming:", participantNames);
+            LogXpControllerEvent(std::format(
+                "No connected non-host participants increased their level during rollover; resetting progress and restarting farming. {}",
+                BuildXpControllerDiagnostics()));
+            xpControllerPhase = XpControllerPhase::FARMING_ROUND;
+            BeginXpFarmingRound();
+            return;
+        }
+        if (!rejoinRequests.empty()) {
             std::vector<std::string> names;
-            names.reserve(levelUps.size());
-            for (const auto playerId : levelUps) {
+            names.reserve(rejoinRequests.size());
+            for (const auto playerId : rejoinRequests) {
                 auto it = xpTrackedPlayers.find(playerId);
                 if (it != xpTrackedPlayers.end()) names.push_back(it->second.name);
             }
-            BroadcastXpControllerPlayerList("Please rejoin (XP rollover):", names);
+
+            BroadcastXpControllerPlayerList("No level increase; please rejoin:", names);
             LogXpControllerEvent(std::format(
-                "Rollover level increase detected for {} participant(s); sending rejoin notice and starting 30s wait.",
-                levelUps.size()));
+                "No rollover level increase detected for {} participant(s); sending rejoin notice and starting 30s wait.",
+                rejoinRequests.size()));
             xpControllerStage = XpControllerStage::AwaitingRejoin;
             xpControllerDeadline = std::chrono::steady_clock::now() + xpRejoinWindow;
             return;
         }
 
         if (AllConnectedPlayersCompletedRollover()) {
-            StopXpController("All connected players completed their XP rollover.");
+            StopXpController("All non-host participants completed their XP rollover.");
             return;
         }
         LogXpControllerEvent(std::format(
-            "No rollover level increase detected; participants={}, starting next rollover match.",
+            "All eligible participants increased their level or already completed rollover; participants={}, starting next rollover match.",
             GetConnectedNonHostCount()));
         BeginXpRolloverRound();
+    }
+
+    int GetXpFarmingDurationSeconds() {
+        return xpFarmingDurationSeconds;
+    }
+
+    void SetXpFarmingDurationSeconds(int seconds) {
+        xpFarmingDurationSeconds = (std::clamp)(seconds, 1, 3600);
     }
 
     void StartXpController() {
@@ -807,11 +855,12 @@ namespace PlayersTab {
         case XpControllerStage::AwaitingMatch:
             if (IsInGame()) {
                 xpControllerStage = XpControllerStage::MatchTimer;
-                xpControllerDeadline = now + (xpControllerPhase == XpControllerPhase::FARMING_ROUND
-                    ? xpFarmingDuration : xpRolloverDuration);
+                const int matchDurationSeconds = xpControllerPhase == XpControllerPhase::FARMING_ROUND
+                    ? xpFarmingDurationSeconds : static_cast<int>(xpRolloverDuration.count());
+                xpControllerDeadline = now + std::chrono::seconds(matchDurationSeconds);
                 LogXpControllerEvent(std::format(
                     "Match scene detected; starting {}s timer. {}",
-                    xpControllerPhase == XpControllerPhase::FARMING_ROUND ? 180 : 35,
+                    matchDurationSeconds,
                     BuildXpControllerDiagnostics()));
             }
             else if (now >= xpControllerDeadline) {
