@@ -27,7 +27,9 @@ namespace Toasts
 		float edgePadding = 15.f * State.dpiScale;
 		bool showToast = true; // just for p_open
 
-		float toastWidth = 300.f * State.dpiScale;
+		const ImVec2 gameWindowSize = DirectX::GetWindowSize(false);
+		const float maxToastWidth = (std::max)(1.f, gameWindowSize.x - 2.f * edgePadding);
+		float toastWidth = (std::min)(480.f * State.dpiScale, maxToastWidth);
 		float toastHeight = 100.f * State.dpiScale;
 
 		auto start = pendingToasts.size() > static_cast<std::size_t>(State.MaxToasts) ?
@@ -35,15 +37,19 @@ namespace Toasts
 		int offsetIndex = 0;
 		float toastOffset = 0.f;
 
-		float windowXOffset = (DirectX::GetWindowSize(true).x - DirectX::GetWindowSize(false).x) / 2.f;
-		float windowYOffset = (DirectX::GetWindowSize(true).y - DirectX::GetWindowSize(false).y) / 2.f;
+		float windowXOffset = (DirectX::GetWindowSize(true).x - gameWindowSize.x) / 2.f;
+		float windowYOffset = (DirectX::GetWindowSize(true).y - gameWindowSize.y) / 2.f;
 
 		for (auto it = start; it != pendingToasts.end();) {
 			ToastInfo& toast = *it;
 			bool clearToast = false;
 
-			toastHeight = 50.f * State.dpiScale +
+			toastHeight = 55.f * State.dpiScale +
 				ImGui::CalcTextSize(toast.body.c_str(), 0, false, toastWidth - 15.f * State.dpiScale).y;
+			const float maxToastHeight = (std::min)(
+				(std::max)(160.f * State.dpiScale, gameWindowSize.y * 0.6f),
+				(std::max)(1.f, gameWindowSize.y - 2.f * edgePadding));
+			toastHeight = (std::min)(toastHeight, maxToastHeight);
 
 			std::string windowName = std::format("###Toast_{}", offsetIndex);
 			float toastXPos, toastYPos;
@@ -53,16 +59,16 @@ namespace Toasts
 				toastXPos = windowXOffset + edgePadding;
 				break;
 			case AlignmentY::Center:
-				toastXPos = windowXOffset + (DirectX::GetWindowSize(false).x - toastWidth) / 2.f;
+				toastXPos = windowXOffset + (gameWindowSize.x - toastWidth) / 2.f;
 				break;
 			case AlignmentY::Right:
-				toastXPos = windowXOffset + DirectX::GetWindowSize(false).x - edgePadding - toastWidth;
+				toastXPos = windowXOffset + gameWindowSize.x - edgePadding - toastWidth;
 				break;
 			}
 
 			toastYPos = State.ToastsOnTop ?
 				windowYOffset + edgePadding + toastOffset :
-				windowYOffset + DirectX::GetWindowSize(false).y - edgePadding - toastOffset - toastHeight;
+				windowYOffset + gameWindowSize.y - edgePadding - toastOffset - toastHeight;
 
 			ImGui::SetNextWindowSize(ImVec2(toastWidth, toastHeight), ImGuiCond_Always);
 			ImGui::SetNextWindowPos(ImVec2(toastXPos, toastYPos), ImGuiCond_Always);

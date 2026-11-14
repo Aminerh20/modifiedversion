@@ -230,6 +230,7 @@ namespace GameTab {
                     ImGui::TextWrapped("%s", status.c_str());
                 }
                 ImGui::TextDisabled("Host only - a round with no level increase marks that player complete.");
+                ImGui::TextDisabled("Cycle diagnostics: SickoMenu/sicko-log.txt");
             }
 
             // Drain XP - host-only automation that force-starts the game and ends it right
