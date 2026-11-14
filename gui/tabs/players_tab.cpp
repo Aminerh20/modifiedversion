@@ -66,6 +66,7 @@ namespace PlayersTab {
         bool has_farming_attempt = false;
         bool connected = false;
         bool disconnected_after_rejoin_request = false;
+        bool disconnected_during_round = false;
         bool has_match_snapshot = false;
         bool was_impostor_this_round = false;
         bool farmed_this_round = false;
@@ -196,10 +197,11 @@ namespace PlayersTab {
 
             const auto& state = tracked->second;
             details += std::format(
-                "; player[{}]='{}' host={} dead={} level={} snapshot={} lastRoundLevel={} roundImpostor={} farmedThisRound={} objectiveComplete={} impostor={} shielded={} needsRejoin={} rolloverComplete={} unchangedDrainRounds={}",
+                "; player[{}]='{}' host={} dead={} level={} snapshot={} lastRoundLevel={} roundImpostor={} farmedThisRound={} disconnectedDuringRound={} objectiveComplete={} impostor={} shielded={} needsRejoin={} rolloverComplete={} unchangedDrainRounds={}",
                 playerId, name, state.is_host, data != nullptr && data->fields.IsDead,
                 data != nullptr ? data->fields.PlayerLevel : 0, state.level_at_match_start, state.level_after_last_round,
-                state.was_impostor_this_round, state.farmed_this_round, state.has_completed_objective,
+                state.was_impostor_this_round, state.farmed_this_round, state.disconnected_during_round,
+                state.has_completed_objective,
                 state.is_impostor, state.is_shielded,
                 state.needs_rejoin, state.rollover_complete, state.consecutive_no_level_rounds);
         }
@@ -210,9 +212,9 @@ namespace PlayersTab {
                 });
             if (currentlyConnected) continue;
             details += std::format(
-                "; player[{}]='{}' disconnected=true host={} lastRoundLevel={} roundImpostor={} farmedThisRound={} objectiveComplete={} impostor={} shielded={} needsRejoin={} rolloverComplete={} unchangedDrainRounds={}",
+                "; player[{}]='{}' disconnected=true host={} lastRoundLevel={} roundImpostor={} farmedThisRound={} disconnectedDuringRound={} objectiveComplete={} impostor={} shielded={} needsRejoin={} rolloverComplete={} unchangedDrainRounds={}",
                 playerId, state.name, state.is_host, state.level_after_last_round,
-                state.was_impostor_this_round, state.farmed_this_round,
+                state.was_impostor_this_round, state.farmed_this_round, state.disconnected_during_round,
                 state.has_completed_objective, state.is_impostor, state.is_shielded,
                 state.needs_rejoin, state.rollover_complete, state.consecutive_no_level_rounds);
         }
@@ -307,7 +309,8 @@ namespace PlayersTab {
             }
             tracked.connected = true;
 
-            if (inserted || !tracked.has_match_snapshot) {
+            if (xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP
+                && (inserted || !tracked.has_match_snapshot)) {
                 auto data = GetPlayerData(player);
                 if (data != nullptr) {
                     tracked.level_at_match_start = data->fields.PlayerLevel;
@@ -320,6 +323,12 @@ namespace PlayersTab {
             if (!tracked.connected && tracked.needs_rejoin) {
                 tracked.disconnected_after_rejoin_request = true;
             }
+            if (!tracked.connected
+                && (xpControllerStage == XpControllerStage::AwaitingMatch
+                    || xpControllerStage == XpControllerStage::MatchTimer)
+                && !tracked.is_host) {
+                tracked.disconnected_during_round = true;
+            }
         }
     }
 
@@ -329,16 +338,28 @@ namespace PlayersTab {
             if (data == nullptr) continue;
             auto& tracked = xpTrackedPlayers[player->fields.PlayerId];
             tracked.name = XpPlayerName(player);
-            tracked.level_at_match_start = data->fields.PlayerLevel;
-            tracked.level_after_last_round = data->fields.PlayerLevel;
             tracked.was_impostor_this_round = tracked.is_impostor && !tracked.is_host;
             tracked.farmed_this_round = false;
-            tracked.has_match_snapshot = true;
-            LogXpControllerEvent(std::format(
-                "Round snapshot: player='{}' id={} role={} levelAtStart={} host={} completedBeforeRound={}.",
-                tracked.name, player->fields.PlayerId,
-                tracked.was_impostor_this_round ? "Impostor" : "Crewmate",
-                tracked.level_at_match_start, tracked.is_host, tracked.has_completed_objective));
+            tracked.disconnected_during_round = false;
+            tracked.has_match_snapshot = xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP;
+            if (tracked.has_match_snapshot) {
+                tracked.level_at_match_start = data->fields.PlayerLevel;
+                tracked.level_after_last_round = data->fields.PlayerLevel;
+            }
+            if (tracked.has_match_snapshot) {
+                LogXpControllerEvent(std::format(
+                    "Round snapshot: player='{}' id={} role={} levelCheckEnabled=true levelAtStart={} host={} completedBeforeRound={}.",
+                    tracked.name, player->fields.PlayerId,
+                    tracked.was_impostor_this_round ? "Impostor" : "Crewmate",
+                    tracked.level_at_match_start, tracked.is_host, tracked.has_completed_objective));
+            }
+            else {
+                LogXpControllerEvent(std::format(
+                    "Round snapshot: player='{}' id={} role={} levelCheckEnabled=false host={} completedBeforeRound={}.",
+                    tracked.name, player->fields.PlayerId,
+                    tracked.was_impostor_this_round ? "Impostor" : "Crewmate",
+                    tracked.is_host, tracked.has_completed_objective));
+            }
         }
     }
 
@@ -351,19 +372,22 @@ namespace PlayersTab {
             if (it == xpTrackedPlayers.end()) continue;
 
             auto& tracked = it->second;
-            const bool leveledUp = tracked.has_match_snapshot
-                && data->fields.PlayerLevel > tracked.level_at_match_start;
-            tracked.levels_gained_last_round = leveledUp
-                ? data->fields.PlayerLevel - tracked.level_at_match_start
-                : 0;
-            tracked.level_after_last_round = data->fields.PlayerLevel;
+            bool leveledUp = false;
+            if (!farmingRound) {
+                leveledUp = tracked.has_match_snapshot
+                    && data->fields.PlayerLevel > tracked.level_at_match_start;
+                tracked.levels_gained_last_round = leveledUp
+                    ? data->fields.PlayerLevel - tracked.level_at_match_start
+                    : 0;
+                tracked.level_after_last_round = data->fields.PlayerLevel;
+            }
             tracked.is_host = IsMatchCycleHost(player);
             if (tracked.is_host) continue;
 
             if (farmingRound) {
                 if (tracked.was_impostor_this_round) {
-                    tracked.farmed_this_round = leveledUp;
-                    if (leveledUp) {
+                    if (!tracked.disconnected_during_round) {
+                        tracked.farmed_this_round = true;
                         tracked.has_earned_xp = true;
                         tracked.has_completed_objective = true;
                     }
@@ -385,14 +409,23 @@ namespace PlayersTab {
                     }
                 }
             }
-            LogXpControllerEvent(std::format(
-                "XP progress: player='{}' id={} host=false roundRole={} currentRole={} levelAtStart={} levelNow={} levelsGained={} increased={} farmedThisRound={} farmingComplete={} rolloverComplete={} unchangedDrainRounds={} needsRejoin={}.",
-                tracked.name, player->fields.PlayerId,
-                tracked.was_impostor_this_round ? "Impostor" : "Crewmate",
-                tracked.is_impostor ? "Impostor" : "Crewmate",
-                tracked.level_at_match_start, data->fields.PlayerLevel, tracked.levels_gained_last_round,
-                leveledUp, tracked.farmed_this_round, tracked.has_completed_objective,
-                tracked.rollover_complete, tracked.consecutive_no_level_rounds, tracked.needs_rejoin));
+            if (farmingRound) {
+                LogXpControllerEvent(std::format(
+                    "Farming completion: player='{}' id={} host=false roundRole={} currentRole={} disconnectedDuringRound={} farmedThisRound={} farmingComplete={}.",
+                    tracked.name, player->fields.PlayerId,
+                    tracked.was_impostor_this_round ? "Impostor" : "Crewmate",
+                    tracked.is_impostor ? "Impostor" : "Crewmate",
+                    tracked.disconnected_during_round, tracked.farmed_this_round,
+                    tracked.has_completed_objective));
+            }
+            else {
+                LogXpControllerEvent(std::format(
+                    "Drain progress: player='{}' id={} host=false roundRole={} levelAtStart={} levelNow={} levelsGained={} increased={} rolloverComplete={} unchangedDrainRounds={} needsRejoin={}.",
+                    tracked.name, player->fields.PlayerId,
+                    tracked.was_impostor_this_round ? "Impostor" : "Crewmate",
+                    tracked.level_at_match_start, data->fields.PlayerLevel, tracked.levels_gained_last_round,
+                    leveledUp, tracked.rollover_complete, tracked.consecutive_no_level_rounds, tracked.needs_rejoin));
+            }
         }
         return rejoinRequests;
     }
@@ -776,7 +809,7 @@ namespace PlayersTab {
                 return !entry.second.is_host && entry.second.has_completed_objective;
             });
             LogXpControllerEvent(std::format(
-                "Farming XP evaluation: participants={}, completedBefore={}, completedAfter={}; only a level increase by the assigned Impostor counts as farmed.",
+                "Farming round completion: participants={}, completedBefore={}, completedAfter={}; connected assigned Impostors count as farmed after a started round returns to the lobby, regardless of level change.",
                 GetConnectedNonHostCount(), priorCompleted, completed));
             xpControllerPhase = XpControllerPhase::LOBBY_EVAL;
             xpControllerStage = XpControllerStage::EvaluateLobby;
@@ -853,12 +886,7 @@ namespace PlayersTab {
             auto& tracked = xpTrackedPlayers[player->fields.PlayerId];
             tracked.name = XpPlayerName(player);
             tracked.is_host = IsMatchCycleHost(player);
-            auto data = GetPlayerData(player);
-            if (data != nullptr) {
-                tracked.level_at_match_start = data->fields.PlayerLevel;
-                tracked.has_match_snapshot = true;
-                tracked.connected = true;
-            }
+            tracked.connected = true;
         }
         if (xpTrackedPlayers.empty()) {
             Toasts::AddToast("XP Controller", "No connected players are available.", ImVec4(1.f, 0.3f, 0.3f, 1.f));
