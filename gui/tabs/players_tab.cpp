@@ -68,6 +68,8 @@ namespace PlayersTab {
         bool disconnected_after_rejoin_request = false;
         bool has_match_snapshot = false;
         uint32_t level_at_match_start = 0;
+        uint32_t levels_gained_last_round = 0;
+        uint32_t consecutive_no_level_rounds = 0;
         std::string name;
     };
 
@@ -80,6 +82,8 @@ namespace PlayersTab {
     static std::chrono::steady_clock::time_point xpParticipantWaitStarted;
     static std::chrono::steady_clock::time_point xpHostAuthorityLostAt;
     static std::chrono::steady_clock::time_point xpPostChatDeadline;
+    static Game::PlayerId xpFarmingRotationCursor = 0;
+    static bool xpHasFarmingRotationCursor = false;
     static XpControllerStage xpStageBeforeParticipantWait = XpControllerStage::PreparingRound;
     static constexpr auto xpRoundPrepareDelay = std::chrono::seconds(1);
     static constexpr auto xpPostChatReadDelay = std::chrono::seconds(7);
@@ -189,11 +193,11 @@ namespace PlayersTab {
 
             const auto& state = tracked->second;
             details += std::format(
-                "; player[{}]='{}' host={} dead={} level={} snapshot={} objectiveComplete={} impostor={} shielded={} needsRejoin={} rolloverComplete={}",
+                "; player[{}]='{}' host={} dead={} level={} snapshot={} objectiveComplete={} impostor={} shielded={} needsRejoin={} rolloverComplete={} unchangedDrainRounds={}",
                 playerId, name, state.is_host, data != nullptr && data->fields.IsDead,
                 data != nullptr ? data->fields.PlayerLevel : 0, state.level_at_match_start,
                 state.has_completed_objective, state.is_impostor, state.is_shielded,
-                state.needs_rejoin, state.rollover_complete);
+                state.needs_rejoin, state.rollover_complete, state.consecutive_no_level_rounds);
         }
         for (const auto& [playerId, state] : xpTrackedPlayers) {
             const bool currentlyConnected = std::any_of(
@@ -202,9 +206,9 @@ namespace PlayersTab {
                 });
             if (currentlyConnected) continue;
             details += std::format(
-                "; player[{}]='{}' disconnected=true host={} objectiveComplete={} impostor={} shielded={} needsRejoin={} rolloverComplete={}",
+                "; player[{}]='{}' disconnected=true host={} objectiveComplete={} impostor={} shielded={} needsRejoin={} rolloverComplete={} unchangedDrainRounds={}",
                 playerId, state.name, state.is_host, state.has_completed_objective, state.is_impostor,
-                state.is_shielded, state.needs_rejoin, state.rollover_complete);
+                state.is_shielded, state.needs_rejoin, state.rollover_complete, state.consecutive_no_level_rounds);
         }
         return details;
     }
@@ -270,10 +274,15 @@ namespace PlayersTab {
         std::vector<std::string> stillNeedFarming;
         for (const auto playerId : participantIds) {
             const auto& tracked = xpTrackedPlayers.at(playerId);
-            if (tracked.is_impostor) farmedThisRound.push_back(tracked.name);
+            if (tracked.is_impostor && tracked.has_completed_objective) {
+                farmedThisRound.push_back(std::format(
+                    "{} (+{} level{}; exact XP unavailable)",
+                    tracked.name, tracked.levels_gained_last_round,
+                    tracked.levels_gained_last_round == 1 ? "" : "s"));
+            }
             if (!tracked.has_completed_objective) stillNeedFarming.push_back(tracked.name);
         }
-        BroadcastXpControllerPlayerList("Farmed this round:", farmedThisRound);
+        BroadcastXpControllerPlayerList("Farmed successfully this round:", farmedThisRound);
         BroadcastXpControllerPlayerList("Still need farming:", stillNeedFarming);
     }
 
@@ -322,9 +331,8 @@ namespace PlayersTab {
         }
     }
 
-    static std::vector<Game::PlayerId> EvaluateXpProgress(bool farmingRound, bool* anyLevelIncrease = nullptr) {
+    static std::vector<Game::PlayerId> EvaluateXpProgress(bool farmingRound) {
         std::vector<Game::PlayerId> rejoinRequests;
-        if (anyLevelIncrease != nullptr) *anyLevelIncrease = false;
         for (auto player : GetConnectedXpPlayers()) {
             auto data = GetPlayerData(player);
             if (data == nullptr) continue;
@@ -334,32 +342,39 @@ namespace PlayersTab {
             auto& tracked = it->second;
             const bool leveledUp = tracked.has_match_snapshot
                 && data->fields.PlayerLevel > tracked.level_at_match_start;
-            if (leveledUp && !IsMatchCycleHost(player) && anyLevelIncrease != nullptr) {
-                *anyLevelIncrease = true;
-            }
+            tracked.levels_gained_last_round = leveledUp
+                ? data->fields.PlayerLevel - tracked.level_at_match_start
+                : 0;
             tracked.is_host = IsMatchCycleHost(player);
             if (tracked.is_host) continue;
 
             if (farmingRound) {
-                tracked.has_earned_xp = !leveledUp;
-                tracked.has_completed_objective = !leveledUp;
+                if (tracked.is_impostor) {
+                    tracked.has_earned_xp = leveledUp;
+                    tracked.has_completed_objective = leveledUp;
+                }
             }
             else if (!tracked.rollover_complete) {
                 if (leveledUp) {
-                    tracked.rollover_complete = true;
+                    tracked.consecutive_no_level_rounds = 0;
                     tracked.needs_rejoin = false;
                     tracked.disconnected_after_rejoin_request = false;
                 }
                 else {
-                    tracked.needs_rejoin = true;
-                    tracked.disconnected_after_rejoin_request = false;
-                    rejoinRequests.push_back(player->fields.PlayerId);
+                    ++tracked.consecutive_no_level_rounds;
+                    if (tracked.consecutive_no_level_rounds >= 2) {
+                        tracked.rollover_complete = true;
+                        tracked.needs_rejoin = true;
+                        tracked.disconnected_after_rejoin_request = false;
+                        rejoinRequests.push_back(player->fields.PlayerId);
+                    }
                 }
             }
             LogXpControllerEvent(std::format(
-                "XP progress: player='{}' id={} host=false levelAtStart={} levelNow={} increased={} farmingComplete={} rolloverComplete={} needsRejoin={}.",
-                tracked.name, player->fields.PlayerId, tracked.level_at_match_start, data->fields.PlayerLevel,
-                leveledUp, tracked.has_completed_objective, tracked.rollover_complete, tracked.needs_rejoin));
+                "XP progress: player='{}' id={} host=false impostor={} levelAtStart={} levelNow={} increased={} farmingComplete={} rolloverComplete={} unchangedDrainRounds={} needsRejoin={}.",
+                tracked.name, player->fields.PlayerId, tracked.is_impostor, tracked.level_at_match_start,
+                data->fields.PlayerLevel, leveledUp, tracked.has_completed_objective,
+                tracked.rollover_complete, tracked.consecutive_no_level_rounds, tracked.needs_rejoin));
         }
         return rejoinRequests;
     }
@@ -442,17 +457,36 @@ namespace PlayersTab {
             return false;
         }
 
-        std::vector<PlayerControl*> impostors;
-        for (auto player : players) {
-            if (IsMatchCycleHost(player)) continue;
-            auto it = xpTrackedPlayers.find(player->fields.PlayerId);
-            if (it != xpTrackedPlayers.end()
-                && (!unearnedOnly || !it->second.has_completed_objective)
-                && (!unearnedOnly || !it->second.has_farming_attempt)
-                && impostors.size() < static_cast<size_t>(teamCap)) {
-                impostors.push_back(player);
+        size_t startIndex = 0;
+        if (unearnedOnly && xpHasFarmingRotationCursor) {
+            const auto nextPlayer = std::lower_bound(
+                players.begin(), players.end(), xpFarmingRotationCursor,
+                [](PlayerControl* player, Game::PlayerId playerId) {
+                    return player->fields.PlayerId < playerId;
+                });
+            if (nextPlayer != players.end()) {
+                startIndex = static_cast<size_t>(std::distance(players.begin(), nextPlayer));
             }
         }
+
+        std::vector<PlayerControl*> impostors;
+        size_t lastSelectedIndex = startIndex;
+        const auto selectImpostors = [&](bool skipAttempted) {
+            impostors.clear();
+            for (size_t offset = 0; offset < players.size()
+                && impostors.size() < static_cast<size_t>(teamCap); ++offset) {
+                const size_t index = (startIndex + offset) % players.size();
+                auto player = players[index];
+                if (IsMatchCycleHost(player)) continue;
+                auto it = xpTrackedPlayers.find(player->fields.PlayerId);
+                if (it == xpTrackedPlayers.end()
+                    || (unearnedOnly && it->second.has_completed_objective)
+                    || (unearnedOnly && skipAttempted && it->second.has_farming_attempt)) continue;
+                impostors.push_back(player);
+                lastSelectedIndex = index;
+            }
+        };
+        selectImpostors(true);
 
         if (unearnedOnly && impostors.empty()) {
             for (auto player : players) {
@@ -462,15 +496,7 @@ namespace PlayersTab {
                     it->second.has_farming_attempt = false;
                 }
             }
-            for (auto player : players) {
-                if (IsMatchCycleHost(player)) continue;
-                auto it = xpTrackedPlayers.find(player->fields.PlayerId);
-                if (it != xpTrackedPlayers.end()
-                    && !it->second.has_completed_objective
-                    && impostors.size() < static_cast<size_t>(teamCap)) {
-                    impostors.push_back(player);
-                }
-            }
+            selectImpostors(false);
         }
 
         if (unearnedOnly && impostors.empty()) {
@@ -481,6 +507,10 @@ namespace PlayersTab {
 
         for (auto player : impostors) {
             xpTrackedPlayers[player->fields.PlayerId].has_farming_attempt = true;
+        }
+        if (unearnedOnly && !impostors.empty()) {
+            xpFarmingRotationCursor = players[(lastSelectedIndex + 1) % players.size()]->fields.PlayerId;
+            xpHasFarmingRotationCursor = true;
         }
         for (auto& entry : xpTrackedPlayers) {
             entry.second.is_impostor = false;
@@ -679,6 +709,30 @@ namespace PlayersTab {
         xpControllerDeadline = std::chrono::steady_clock::now() + xpLobbyDelay;
     }
 
+    static void StartNextXpCycle() {
+        std::vector<std::string> participantNames;
+        for (auto& [playerId, tracked] : xpTrackedPlayers) {
+            if (tracked.is_host) continue;
+            tracked.has_earned_xp = false;
+            tracked.has_completed_objective = false;
+            tracked.is_impostor = false;
+            tracked.rollover_complete = false;
+            tracked.has_farming_attempt = false;
+            tracked.needs_rejoin = false;
+            tracked.disconnected_after_rejoin_request = false;
+            tracked.consecutive_no_level_rounds = 0;
+            tracked.levels_gained_last_round = 0;
+            if (tracked.connected) participantNames.push_back(tracked.name);
+        }
+        std::sort(participantNames.begin(), participantNames.end());
+        BroadcastXpControllerPlayerList("Everyone drained; restarting farming:", participantNames);
+        LogXpControllerEvent(std::format(
+            "All connected non-host participants drained; starting the next full farming cycle. {}",
+            BuildXpControllerDiagnostics()));
+        xpControllerPhase = XpControllerPhase::FARMING_ROUND;
+        BeginXpFarmingRound();
+    }
+
     static void ProcessXpLobbyDelay() {
         if (GetConnectedNonHostCount() == 0) {
             LogXpControllerEvent(std::format(
@@ -689,6 +743,12 @@ namespace PlayersTab {
         }
 
         SynchronizeXpPlayers();
+        if (xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP
+            && AllConnectedPlayersCompletedRollover()) {
+            StartNextXpCycle();
+            return;
+        }
+
         if (xpControllerPhase == XpControllerPhase::FARMING_ROUND) {
             const auto priorCompleted = std::count_if(xpTrackedPlayers.begin(), xpTrackedPlayers.end(), [](const auto& entry) {
                 return !entry.second.is_host && entry.second.has_completed_objective;
@@ -698,36 +758,14 @@ namespace PlayersTab {
                 return !entry.second.is_host && entry.second.has_completed_objective;
             });
             LogXpControllerEvent(std::format(
-                "Farming XP evaluation: participants={}, completedBefore={}, completedAfter={}, no level increase means farming complete.",
+                "Farming XP evaluation: participants={}, completedBefore={}, completedAfter={}; only a level increase by the assigned Impostor counts as farmed.",
                 GetConnectedNonHostCount(), priorCompleted, completed));
             xpControllerPhase = XpControllerPhase::LOBBY_EVAL;
             xpControllerStage = XpControllerStage::EvaluateLobby;
             return;
         }
 
-        bool anyLevelIncrease = false;
-        const auto rejoinRequests = EvaluateXpProgress(false, &anyLevelIncrease);
-        if (!anyLevelIncrease) {
-            std::vector<std::string> participantNames;
-            for (auto& [playerId, tracked] : xpTrackedPlayers) {
-                if (tracked.is_host) continue;
-                tracked.has_earned_xp = false;
-                tracked.has_completed_objective = false;
-                tracked.rollover_complete = false;
-                tracked.has_farming_attempt = false;
-                tracked.needs_rejoin = false;
-                tracked.disconnected_after_rejoin_request = false;
-                if (tracked.connected) participantNames.push_back(tracked.name);
-            }
-            std::sort(participantNames.begin(), participantNames.end());
-            BroadcastXpControllerPlayerList("Drain complete; restarting farming:", participantNames);
-            LogXpControllerEvent(std::format(
-                "No connected non-host participants increased their level during rollover; resetting progress and restarting farming. {}",
-                BuildXpControllerDiagnostics()));
-            xpControllerPhase = XpControllerPhase::FARMING_ROUND;
-            BeginXpFarmingRound();
-            return;
-        }
+        const auto rejoinRequests = EvaluateXpProgress(false);
         if (!rejoinRequests.empty()) {
             std::vector<std::string> names;
             names.reserve(rejoinRequests.size());
@@ -736,21 +774,17 @@ namespace PlayersTab {
                 if (it != xpTrackedPlayers.end()) names.push_back(it->second.name);
             }
 
-            BroadcastXpControllerPlayerList("No level increase; please rejoin:", names);
+            BroadcastXpControllerPlayerList("No level increase for 2 drain rounds; please rejoin:", names);
             LogXpControllerEvent(std::format(
-                "No rollover level increase detected for {} participant(s); sending rejoin notice and starting 30s wait.",
+                "{} participant(s) had two consecutive drain rounds without a level increase; sending rejoin notice and starting 30s wait.",
                 rejoinRequests.size()));
             xpControllerStage = XpControllerStage::AwaitingRejoin;
             xpControllerDeadline = std::chrono::steady_clock::now() + xpRejoinWindow;
             return;
         }
 
-        if (AllConnectedPlayersCompletedRollover()) {
-            StopXpController("All non-host participants completed their XP rollover.");
-            return;
-        }
         LogXpControllerEvent(std::format(
-            "All eligible participants increased their level or already completed rollover; participants={}, starting next rollover match.",
+            "Drain round evaluated; starting next rollover match for participants not yet drained. participants={}.",
             GetConnectedNonHostCount()));
         BeginXpRolloverRound();
     }
@@ -775,6 +809,7 @@ namespace PlayersTab {
         }
 
         xpTrackedPlayers.clear();
+        xpHasFarmingRotationCursor = false;
         for (auto player : GetConnectedXpPlayers()) {
             auto& tracked = xpTrackedPlayers[player->fields.PlayerId];
             tracked.name = XpPlayerName(player);
@@ -948,6 +983,9 @@ namespace PlayersTab {
             if (AllConnectedPlayersEarnedXp()) {
                 for (auto& [playerId, tracked] : xpTrackedPlayers) {
                     tracked.rollover_complete = false;
+                    tracked.consecutive_no_level_rounds = 0;
+                    tracked.needs_rejoin = false;
+                    tracked.disconnected_after_rejoin_request = false;
                 }
                 xpControllerPhase = XpControllerPhase::ROLLOVER_LOOP;
                 LogXpControllerEvent(std::format(

@@ -236,7 +236,7 @@ namespace GameTab {
                     const std::string status = PlayersTab::GetXpControllerStatus();
                     ImGui::TextWrapped("%s", status.c_str());
                 }
-                ImGui::TextDisabled("Host only - farming completes players with no level increase; drain restarts farming when no one levels up.");
+                ImGui::TextDisabled("Host is excluded. Only an assigned Impostor's level increase counts as farmed; drain needs 2 unchanged rounds.");
                 ImGui::TextDisabled("Cycle diagnostics: SickoMenu/sicko-log.txt");
             }
 
