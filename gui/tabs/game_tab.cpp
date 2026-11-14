@@ -211,6 +211,27 @@ namespace GameTab {
                 ShowHudNotification("Allowed everyone to NoClip!");
             }
 
+            // Match Cycle - host-only round controller with automatic lobby and rollover checks.
+            if (IsHost() && IsInLobby()) {
+                ImGui::Dummy(ImVec2(7, 7) * State.dpiScale);
+                ImGui::Separator();
+                ImGui::Dummy(ImVec2(7, 7) * State.dpiScale);
+
+                if (!PlayersTab::IsXpControllerRunning()) {
+                    if (AnimatedButton("Start Match Cycle")) {
+                        PlayersTab::StartXpController();
+                    }
+                }
+                else {
+                    if (ColoredButton(ImVec4(1.f, 0.f, 0.f, 1.f), "Stop Match Cycle")) {
+                        PlayersTab::StopXpController();
+                    }
+                    const std::string status = PlayersTab::GetXpControllerStatus();
+                    ImGui::TextWrapped("%s", status.c_str());
+                }
+                ImGui::TextDisabled("Host only - a round with no level increase marks that player complete.");
+            }
+
             // Drain XP - host-only automation that force-starts the game and ends it right
             // after the loading bar, until every lobby player's accumulated XP is drained.
             if (IsHost() && IsInLobby()) {

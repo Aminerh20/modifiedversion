@@ -37,6 +37,11 @@ namespace PlayersTab {
 	void ClearProtectionTargets();
 	void ReapplyProtectionNow();
 	void RenderProtectionControls();
+	void StartXpController();
+	void StopXpController();
+	bool IsXpControllerRunning();
+	void TickXpController();
+	std::string GetXpControllerStatus();
 	void TickKillLoop();
 	void StopKillLoop();
 	void RenderKillControls();

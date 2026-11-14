@@ -8,6 +8,12 @@
 #include <future>
 #include <_hooks.h>
 #include <unordered_map>
+#include <algorithm>
+#include <chrono>
+#include <string>
+#include <utility>
+#include "../../improvements/DrainXp.h"
+#include "../../improvements/DrainXpV2.h"
 
 namespace PlayersTab {
     int framesPassed = -1;
@@ -20,9 +26,632 @@ namespace PlayersTab {
     static std::vector<Game::PlayerId> protectionTargets = {};
     static size_t protectionTargetIndex = 0;
     static std::chrono::steady_clock::time_point lastProtectionTime = std::chrono::steady_clock::now();
+    static bool matchCycleProtectionOwnsSettings = false;
+    static bool matchCyclePreviousProtectionEnabled = false;
+    static bool matchCyclePreviousCrewmatesOnly = false;
+    static int matchCyclePreviousProtectionIntervalMs = 50;
+    static std::vector<Game::PlayerId> matchCyclePreviousProtectionTargets;
+    static constexpr int matchCycleProtectionIntervalMs = 70;
     static bool killToggleUiEnabled = false;
     static int killIntervalMs = 500;
     static std::chrono::steady_clock::time_point lastKillTime = std::chrono::steady_clock::now();
+
+    enum class XpControllerPhase {
+        STOPPED,
+        FARMING_ROUND,
+        LOBBY_EVAL,
+        ROLLOVER_LOOP,
+    };
+
+    enum class XpControllerStage {
+        PreparingRound,
+        AwaitingMatch,
+        MatchTimer,
+        AwaitingLobby,
+        AwaitingRejoin,
+        LobbyDelay,
+        EvaluateLobby,
+    };
+
+    struct XpTrackedPlayer {
+        bool has_earned_xp = false;
+        bool has_completed_objective = false;
+        bool is_host = false;
+        bool is_impostor = false;
+        bool is_shielded = false;
+        bool needs_rejoin = false;
+        bool rollover_complete = false;
+        bool has_farming_attempt = false;
+        bool connected = false;
+        bool disconnected_after_rejoin_request = false;
+        bool has_match_snapshot = false;
+        uint32_t level_at_match_start = 0;
+        std::string name;
+    };
+
+    static XpControllerPhase xpControllerPhase = XpControllerPhase::STOPPED;
+    static XpControllerStage xpControllerStage = XpControllerStage::PreparingRound;
+    static std::unordered_map<Game::PlayerId, XpTrackedPlayer> xpTrackedPlayers;
+    static std::chrono::steady_clock::time_point xpControllerDeadline;
+    static std::chrono::steady_clock::time_point xpLastRosterCheck;
+    static constexpr auto xpRoundPrepareDelay = std::chrono::seconds(1);
+    static constexpr auto xpFarmingDuration = std::chrono::seconds(180);
+    static constexpr auto xpRolloverDuration = std::chrono::seconds(35);
+    static constexpr auto xpRejoinWindow = std::chrono::seconds(30);
+    static constexpr auto xpLobbyDelay = std::chrono::seconds(20);
+    static constexpr auto xpStageTimeout = std::chrono::seconds(60);
+    static constexpr auto xpRosterCheckInterval = std::chrono::milliseconds(70);
+
+    static void SetShieldState(Game::PlayerId playerId, bool enabled);
+    static void RestoreMatchCycleProtectionSettings();
+
+    static bool IsMatchCycleHost(const PlayerControl* player) {
+        return player != nullptr
+            && Game::pLocalPlayer != nullptr
+            && *Game::pLocalPlayer != nullptr
+            && player->fields.PlayerId == (*Game::pLocalPlayer)->fields.PlayerId;
+    }
+
+    static int GetMatchCycleTeamCap(size_t nonHostParticipants) {
+        if (nonHostParticipants >= 7) return 3;
+        if (nonHostParticipants >= 4) return 2;
+        if (nonHostParticipants >= 2) return 1;
+        return 0;
+    }
+
+    bool IsXpControllerRunning() {
+        return xpControllerPhase != XpControllerPhase::STOPPED;
+    }
+
+    static std::vector<PlayerControl*> GetConnectedXpPlayers() {
+        std::vector<PlayerControl*> players;
+        for (auto player : GetAllPlayerControl()) {
+            if (player == nullptr) continue;
+            auto data = GetPlayerData(player);
+            if (data == nullptr || data->fields.Disconnected) continue;
+            players.push_back(player);
+        }
+        std::sort(players.begin(), players.end(), [](PlayerControl* left, PlayerControl* right) {
+            return left->fields.PlayerId < right->fields.PlayerId;
+        });
+        return players;
+    }
+
+    static size_t GetConnectedNonHostCount() {
+        const auto players = GetConnectedXpPlayers();
+        return static_cast<size_t>(std::count_if(players.begin(), players.end(), [](PlayerControl* player) {
+            return !IsMatchCycleHost(player);
+        }));
+    }
+
+    static std::string XpPlayerName(PlayerControl* player) {
+        auto data = GetPlayerData(player);
+        if (data == nullptr) return "Unknown";
+        std::string name = RemoveHtmlTags(convert_from_string(NetworkedPlayerInfo_get_PlayerName(data, nullptr)));
+        return name.empty() ? "Unknown" : name;
+    }
+
+    static bool CanSendXpControllerChat() {
+        return Game::pLocalPlayer != nullptr
+            && *Game::pLocalPlayer != nullptr
+            && Game::HudManager.GetInstance() != nullptr
+            && Game::HudManager.GetInstance()->fields.Chat != nullptr;
+    }
+
+    static void SendXpControllerChat(const std::string& message) {
+        if (!CanSendXpControllerChat()) {
+            Toasts::AddToast("XP Controller", "Lobby chat is unavailable; status message was not sent.", ImVec4(1.f, 0.3f, 0.3f, 1.f));
+            return;
+        }
+
+        constexpr size_t maxChatLength = 110;
+        if (message.size() <= maxChatLength) {
+            PlayerControl_RpcSendChat(*Game::pLocalPlayer, convert_to_string(message), NULL);
+            return;
+        }
+
+        size_t start = 0;
+        while (start < message.size()) {
+            size_t end = (std::min)(start + maxChatLength, message.size());
+            if (end < message.size()) {
+                const size_t lastSpace = message.rfind(' ', end);
+                if (lastSpace != std::string::npos && lastSpace > start) end = lastSpace;
+            }
+            PlayerControl_RpcSendChat(*Game::pLocalPlayer, convert_to_string(message.substr(start, end - start)), NULL);
+            start = end;
+            while (start < message.size() && message[start] == ' ') ++start;
+        }
+    }
+
+    static void BroadcastXpControllerPlayerList(const std::string& label, const std::vector<std::string>& names) {
+        std::string message = label;
+        for (const auto& name : names) {
+            const std::string entry = (message == label ? " " : ", ") + name;
+            if (message.size() + entry.size() > 110 && message != label) {
+                SendXpControllerChat(message);
+                message = label + " " + name;
+            }
+            else {
+                message += entry;
+            }
+        }
+        SendXpControllerChat(message);
+    }
+
+    static void BroadcastXpControllerSummary() {
+        std::vector<std::string> completed;
+        std::vector<std::string> continueFarming;
+        for (auto player : GetConnectedXpPlayers()) {
+            const auto playerId = player->fields.PlayerId;
+            auto it = xpTrackedPlayers.find(playerId);
+            if (it == xpTrackedPlayers.end() || it->second.is_host) continue;
+            (it->second.has_completed_objective ? completed : continueFarming).push_back(XpPlayerName(player));
+        }
+        BroadcastXpControllerPlayerList("No level increase (complete):", completed);
+        BroadcastXpControllerPlayerList("Level increased (continue farming):", continueFarming);
+    }
+
+    static void SynchronizeXpPlayers() {
+        for (auto& [playerId, tracked] : xpTrackedPlayers) {
+            tracked.connected = false;
+        }
+
+        for (auto player : GetConnectedXpPlayers()) {
+            const auto playerId = player->fields.PlayerId;
+            auto [it, inserted] = xpTrackedPlayers.try_emplace(playerId);
+            auto& tracked = it->second;
+            tracked.name = XpPlayerName(player);
+            tracked.is_host = IsMatchCycleHost(player);
+
+            if (!tracked.is_host && tracked.needs_rejoin && tracked.disconnected_after_rejoin_request) {
+                tracked.needs_rejoin = false;
+                tracked.disconnected_after_rejoin_request = false;
+            }
+            tracked.connected = true;
+
+            if (inserted || !tracked.has_match_snapshot) {
+                auto data = GetPlayerData(player);
+                if (data != nullptr) {
+                    tracked.level_at_match_start = data->fields.PlayerLevel;
+                    tracked.has_match_snapshot = true;
+                }
+            }
+        }
+
+        for (auto& [playerId, tracked] : xpTrackedPlayers) {
+            if (!tracked.connected && tracked.needs_rejoin) {
+                tracked.disconnected_after_rejoin_request = true;
+            }
+        }
+    }
+
+    static void SnapshotXpLevels() {
+        for (auto player : GetConnectedXpPlayers()) {
+            auto data = GetPlayerData(player);
+            if (data == nullptr) continue;
+            auto& tracked = xpTrackedPlayers[player->fields.PlayerId];
+            tracked.name = XpPlayerName(player);
+            tracked.level_at_match_start = data->fields.PlayerLevel;
+            tracked.has_match_snapshot = true;
+        }
+    }
+
+    static std::vector<Game::PlayerId> FindXpLevelUps(bool farmingRound) {
+        std::vector<Game::PlayerId> levelUps;
+        for (auto player : GetConnectedXpPlayers()) {
+            auto data = GetPlayerData(player);
+            if (data == nullptr) continue;
+            auto it = xpTrackedPlayers.find(player->fields.PlayerId);
+            if (it == xpTrackedPlayers.end()) continue;
+
+            auto& tracked = it->second;
+            const bool leveledUp = tracked.has_match_snapshot
+                && data->fields.PlayerLevel > tracked.level_at_match_start;
+            tracked.is_host = IsMatchCycleHost(player);
+            if (tracked.is_host) continue;
+
+            if (farmingRound) {
+                tracked.has_earned_xp = !leveledUp;
+                tracked.has_completed_objective = !leveledUp;
+            }
+            else {
+                if (leveledUp) {
+                    tracked.rollover_complete = false;
+                    tracked.needs_rejoin = true;
+                    tracked.disconnected_after_rejoin_request = false;
+                    levelUps.push_back(player->fields.PlayerId);
+                }
+                else if (!tracked.rollover_complete) {
+                    tracked.rollover_complete = true;
+                }
+            }
+        }
+        return levelUps;
+    }
+
+    static bool AllConnectedPlayersEarnedXp() {
+        const auto players = GetConnectedXpPlayers();
+        const size_t participantCount = GetConnectedNonHostCount();
+        return participantCount > 0 && std::all_of(players.begin(), players.end(), [](PlayerControl* player) {
+            if (IsMatchCycleHost(player)) return true;
+            auto it = xpTrackedPlayers.find(player->fields.PlayerId);
+            return it != xpTrackedPlayers.end() && it->second.has_completed_objective;
+        });
+    }
+
+    static bool AllConnectedPlayersCompletedRollover() {
+        const auto players = GetConnectedXpPlayers();
+        const size_t participantCount = GetConnectedNonHostCount();
+        return participantCount > 0 && std::all_of(players.begin(), players.end(), [](PlayerControl* player) {
+            if (IsMatchCycleHost(player)) return true;
+            auto it = xpTrackedPlayers.find(player->fields.PlayerId);
+            return it != xpTrackedPlayers.end() && it->second.rollover_complete;
+        });
+    }
+
+    static bool AllRequestedPlayersRejoined() {
+        for (const auto& [playerId, tracked] : xpTrackedPlayers) {
+            if (!tracked.is_host && tracked.needs_rejoin) return false;
+        }
+        return true;
+    }
+
+    static void StopXpController(const std::string& reason, bool showToast = true) {
+        if (!IsXpControllerRunning()) return;
+        xpControllerPhase = XpControllerPhase::STOPPED;
+        xpControllerStage = XpControllerStage::PreparingRound;
+        for (auto& [playerId, tracked] : xpTrackedPlayers) {
+            if (tracked.is_shielded) SetShieldState(playerId, false);
+        }
+        RestoreMatchCycleProtectionSettings();
+        xpTrackedPlayers.clear();
+        if (showToast) {
+            Toasts::AddToast("XP Controller", reason, ImVec4(1.f, 0.6f, 0.2f, 1.f));
+        }
+    }
+
+    static bool ConfigureMatchCycleTeams(bool unearnedOnly) {
+        const auto players = GetConnectedXpPlayers();
+        const size_t participantCount = GetConnectedNonHostCount();
+        const int teamCap = GetMatchCycleTeamCap(participantCount);
+        if (players.empty() || participantCount < 2 || teamCap == 0) {
+            StopXpController("At least two connected non-host participants are required.");
+            return false;
+        }
+
+        std::vector<PlayerControl*> impostors;
+        for (auto player : players) {
+            if (IsMatchCycleHost(player)) continue;
+            auto it = xpTrackedPlayers.find(player->fields.PlayerId);
+            if (it != xpTrackedPlayers.end()
+                && (!unearnedOnly || !it->second.has_completed_objective)
+                && (!unearnedOnly || !it->second.has_farming_attempt)
+                && impostors.size() < static_cast<size_t>(teamCap)) {
+                impostors.push_back(player);
+            }
+        }
+
+        if (unearnedOnly && impostors.empty()) {
+            for (auto player : players) {
+                if (IsMatchCycleHost(player)) continue;
+                auto it = xpTrackedPlayers.find(player->fields.PlayerId);
+                if (it != xpTrackedPlayers.end() && !it->second.has_completed_objective) {
+                    it->second.has_farming_attempt = false;
+                }
+            }
+            for (auto player : players) {
+                if (IsMatchCycleHost(player)) continue;
+                auto it = xpTrackedPlayers.find(player->fields.PlayerId);
+                if (it != xpTrackedPlayers.end()
+                    && !it->second.has_completed_objective
+                    && impostors.size() < static_cast<size_t>(teamCap)) {
+                    impostors.push_back(player);
+                }
+            }
+        }
+
+        if (unearnedOnly && impostors.empty()) {
+            xpControllerPhase = XpControllerPhase::LOBBY_EVAL;
+            xpControllerStage = XpControllerStage::EvaluateLobby;
+            return false;
+        }
+
+        for (auto player : impostors) {
+            xpTrackedPlayers[player->fields.PlayerId].has_farming_attempt = true;
+        }
+
+        std::vector<PlayerControl*> defenders;
+        for (auto player : players) {
+            const auto playerId = player->fields.PlayerId;
+            auto& tracked = xpTrackedPlayers[playerId];
+            tracked.is_host = IsMatchCycleHost(player);
+            tracked.is_impostor = std::find(impostors.begin(), impostors.end(), player) != impostors.end();
+            State.lobbyRpcQueue.push(new RpcSetRole(
+                player,
+                tracked.is_impostor ? RoleTypes__Enum::Impostor : RoleTypes__Enum::Crewmate));
+            auto data = GetPlayerData(player);
+            if (!tracked.is_impostor && data != nullptr && !data->fields.IsDead) defenders.push_back(player);
+        }
+        std::stable_sort(defenders.begin(), defenders.end(), [](PlayerControl* left, PlayerControl* right) {
+            return IsMatchCycleHost(left) && !IsMatchCycleHost(right);
+        });
+
+        std::vector<Game::PlayerId> desiredShields;
+        for (auto player : defenders) {
+            if (desiredShields.size() == static_cast<size_t>(teamCap)) break;
+            desiredShields.push_back(player->fields.PlayerId);
+        }
+
+        for (auto& [playerId, tracked] : xpTrackedPlayers) {
+            const bool shouldShield = std::find(desiredShields.begin(), desiredShields.end(), playerId) != desiredShields.end();
+            if (tracked.is_shielded && !shouldShield) {
+                SetShieldState(playerId, false);
+                tracked.is_shielded = false;
+            }
+        }
+        for (const auto playerId : desiredShields) {
+            auto& tracked = xpTrackedPlayers[playerId];
+            if (!tracked.is_shielded) {
+                SetShieldState(playerId, true);
+                tracked.is_shielded = true;
+            }
+        }
+
+        SnapshotXpLevels();
+        return true;
+    }
+
+    static void ReconcileMatchCycleShields() {
+        if (!IsXpControllerRunning() || !IsHost()) return;
+
+        const auto connectedPlayers = GetConnectedXpPlayers();
+        const int teamCap = GetMatchCycleTeamCap(GetConnectedNonHostCount());
+        std::vector<PlayerControl*> eligibleDefenders;
+        for (auto player : connectedPlayers) {
+            auto tracked = xpTrackedPlayers.find(player->fields.PlayerId);
+            auto data = GetPlayerData(player);
+            if (tracked == xpTrackedPlayers.end() || tracked->second.is_impostor
+                || data == nullptr || data->fields.IsDead) continue;
+            eligibleDefenders.push_back(player);
+        }
+        std::stable_sort(eligibleDefenders.begin(), eligibleDefenders.end(), [](PlayerControl* left, PlayerControl* right) {
+            return IsMatchCycleHost(left) && !IsMatchCycleHost(right);
+        });
+
+        std::vector<Game::PlayerId> desiredShields;
+        const auto desiredCount = (std::min)(static_cast<size_t>((std::max)(teamCap, 0)), eligibleDefenders.size());
+        for (auto player : eligibleDefenders) {
+            if (desiredShields.size() == desiredCount) break;
+            desiredShields.push_back(player->fields.PlayerId);
+        }
+
+        for (auto& [playerId, tracked] : xpTrackedPlayers) {
+            const bool shouldShield = std::find(desiredShields.begin(), desiredShields.end(), playerId) != desiredShields.end();
+            if (tracked.is_shielded && !shouldShield) {
+                SetShieldState(playerId, false);
+                tracked.is_shielded = false;
+            }
+        }
+        const auto currentProtectionTargets = protectionTargets;
+        for (const auto playerId : currentProtectionTargets) {
+            if (std::find(desiredShields.begin(), desiredShields.end(), playerId) == desiredShields.end()) {
+                SetShieldState(playerId, false);
+                auto tracked = xpTrackedPlayers.find(playerId);
+                if (tracked != xpTrackedPlayers.end()) tracked->second.is_shielded = false;
+            }
+        }
+        for (const auto playerId : desiredShields) {
+            SetShieldState(playerId, true);
+            xpTrackedPlayers[playerId].is_shielded = true;
+        }
+    }
+
+    static void BeginXpFarmingRound() {
+        if (!IsInLobby() || !IsHost()) return;
+        if (!ConfigureMatchCycleTeams(true)) return;
+        xpControllerPhase = XpControllerPhase::FARMING_ROUND;
+        xpControllerStage = XpControllerStage::PreparingRound;
+        xpControllerDeadline = std::chrono::steady_clock::now() + xpRoundPrepareDelay;
+    }
+
+    static void BeginXpRolloverRound() {
+        if (!IsInLobby() || !IsHost()) return;
+        if (!ConfigureMatchCycleTeams(false)) return;
+        xpControllerPhase = XpControllerPhase::ROLLOVER_LOOP;
+        xpControllerStage = XpControllerStage::PreparingRound;
+        xpControllerDeadline = std::chrono::steady_clock::now();
+    }
+
+    static void StartPreparedXpMatch() {
+        if (!IsInLobby() || !IsHost() || Game::pAmongUsClient == nullptr || *Game::pAmongUsClient == nullptr) {
+            StopXpController("Could not start the next match; host or lobby was lost.");
+            return;
+        }
+        InnerNetClient_SendStartGame((InnerNetClient*)(*Game::pAmongUsClient), NULL);
+        xpControllerStage = XpControllerStage::AwaitingMatch;
+        xpControllerDeadline = std::chrono::steady_clock::now() + xpStageTimeout;
+    }
+
+    static void ForceEndXpMatch() {
+        GameManager* gameManager = GameManager__TypeInfo->static_fields->_Instance_k__BackingField;
+        if (gameManager == nullptr) {
+            StopXpController("Could not end the match because the game manager is unavailable.");
+            return;
+        }
+        GameManager_RpcEndGame(gameManager, GameOverReason__Enum(0), false, NULL);
+        xpControllerStage = XpControllerStage::AwaitingLobby;
+        xpControllerDeadline = std::chrono::steady_clock::now() + xpStageTimeout;
+    }
+
+    static void HandleXpRoundReturnedToLobby() {
+        if (xpControllerPhase == XpControllerPhase::FARMING_ROUND) {
+            FindXpLevelUps(true);
+            xpControllerPhase = XpControllerPhase::LOBBY_EVAL;
+            xpControllerStage = XpControllerStage::EvaluateLobby;
+            return;
+        }
+
+        const auto levelUps = FindXpLevelUps(false);
+        if (!levelUps.empty()) {
+            std::vector<std::string> names;
+            names.reserve(levelUps.size());
+            for (const auto playerId : levelUps) {
+                auto it = xpTrackedPlayers.find(playerId);
+                if (it != xpTrackedPlayers.end()) names.push_back(it->second.name);
+            }
+            BroadcastXpControllerPlayerList("Please rejoin (XP rollover):", names);
+            xpControllerStage = XpControllerStage::AwaitingRejoin;
+            xpControllerDeadline = std::chrono::steady_clock::now() + xpRejoinWindow;
+            return;
+        }
+
+        xpControllerStage = XpControllerStage::LobbyDelay;
+        xpControllerDeadline = std::chrono::steady_clock::now() + xpLobbyDelay;
+    }
+
+    void StartXpController() {
+        if (IsXpControllerRunning()) return;
+        if (!IsInLobby() || !IsHost()) {
+            Toasts::AddToast("XP Controller", "Start this controller from a host lobby.", ImVec4(1.f, 0.3f, 0.3f, 1.f));
+            return;
+        }
+        if (DrainXp::GetRunningStatus() != 0 || DrainXpV2::GetRunningStatus() != 0) {
+            Toasts::AddToast("XP Controller", "Stop the other XP loop before starting this controller.", ImVec4(1.f, 0.3f, 0.3f, 1.f));
+            return;
+        }
+
+        xpTrackedPlayers.clear();
+        for (auto player : GetConnectedXpPlayers()) {
+            auto& tracked = xpTrackedPlayers[player->fields.PlayerId];
+            tracked.name = XpPlayerName(player);
+            tracked.is_host = IsMatchCycleHost(player);
+            auto data = GetPlayerData(player);
+            if (data != nullptr) {
+                tracked.level_at_match_start = data->fields.PlayerLevel;
+                tracked.has_match_snapshot = true;
+                tracked.connected = true;
+            }
+        }
+        if (xpTrackedPlayers.empty()) {
+            Toasts::AddToast("XP Controller", "No connected players are available.", ImVec4(1.f, 0.3f, 0.3f, 1.f));
+            return;
+        }
+        if (GetConnectedNonHostCount() < 2) {
+            xpTrackedPlayers.clear();
+            Toasts::AddToast("XP Controller", "At least two connected non-host participants are required.", ImVec4(1.f, 0.3f, 0.3f, 1.f));
+            return;
+        }
+
+        xpControllerPhase = XpControllerPhase::FARMING_ROUND;
+        xpLastRosterCheck = std::chrono::steady_clock::now();
+        BeginXpFarmingRound();
+        Toasts::AddToast("XP Controller", "Starting the farming rounds.", ImVec4(0.f, 1.f, 0.5f, 1.f));
+    }
+
+    void StopXpController() {
+        StopXpController("Stopped.");
+    }
+
+    std::string GetXpControllerStatus() {
+        if (!IsXpControllerRunning()) return "Stopped";
+        const auto remaining = (std::max)(0LL,
+            std::chrono::duration_cast<std::chrono::seconds>(
+                xpControllerDeadline - std::chrono::steady_clock::now()).count());
+        const char* phaseName = "XP controller";
+        switch (xpControllerPhase) {
+        case XpControllerPhase::FARMING_ROUND: phaseName = "Farming round"; break;
+        case XpControllerPhase::LOBBY_EVAL: phaseName = "Checking lobby XP"; break;
+        case XpControllerPhase::ROLLOVER_LOOP: phaseName = "Rollover loop"; break;
+        case XpControllerPhase::STOPPED: break;
+        }
+        return std::format("{} - {}s", phaseName, remaining);
+    }
+
+    void TickXpController() {
+        if (!IsXpControllerRunning()) return;
+        if (State.PanicMode) {
+            StopXpController("Stopped because panic mode was enabled.");
+            return;
+        }
+        if (!IsHost()) {
+            StopXpController("Stopped because host authority was lost.");
+            return;
+        }
+        if (GetConnectedNonHostCount() < 2) {
+            StopXpController("Stopped because fewer than two non-host participants remain.");
+            return;
+        }
+
+        SynchronizeXpPlayers();
+        const auto now = std::chrono::steady_clock::now();
+        if (now - xpLastRosterCheck >= xpRosterCheckInterval) {
+            xpLastRosterCheck = now;
+            ReconcileMatchCycleShields();
+        }
+        switch (xpControllerStage) {
+        case XpControllerStage::PreparingRound:
+            if (IsInLobby() && now >= xpControllerDeadline) StartPreparedXpMatch();
+            break;
+        case XpControllerStage::AwaitingMatch:
+            if (IsInGame()) {
+                xpControllerStage = XpControllerStage::MatchTimer;
+                xpControllerDeadline = now + (xpControllerPhase == XpControllerPhase::FARMING_ROUND
+                    ? xpFarmingDuration : xpRolloverDuration);
+            }
+            else if (now >= xpControllerDeadline) {
+                StopXpController("The match did not start before the timeout.");
+            }
+            break;
+        case XpControllerStage::MatchTimer:
+            if (IsInLobby()) {
+                HandleXpRoundReturnedToLobby();
+            }
+            else if (now >= xpControllerDeadline) {
+                ForceEndXpMatch();
+            }
+            break;
+        case XpControllerStage::AwaitingLobby:
+            if (IsInLobby()) {
+                HandleXpRoundReturnedToLobby();
+            }
+            else if (now >= xpControllerDeadline) {
+                StopXpController("The lobby did not return before the timeout.");
+            }
+            break;
+        case XpControllerStage::AwaitingRejoin:
+            if (AllRequestedPlayersRejoined() || now >= xpControllerDeadline) {
+                xpControllerStage = XpControllerStage::LobbyDelay;
+                xpControllerDeadline = now + xpLobbyDelay;
+            }
+            break;
+        case XpControllerStage::LobbyDelay:
+            if (now >= xpControllerDeadline) {
+                if (!AllConnectedPlayersEarnedXp()) {
+                    xpControllerPhase = XpControllerPhase::LOBBY_EVAL;
+                    xpControllerStage = XpControllerStage::EvaluateLobby;
+                }
+                else if (AllConnectedPlayersCompletedRollover()) {
+                    StopXpController("All connected players completed their XP rollover.");
+                }
+                else {
+                    BeginXpRolloverRound();
+                }
+            }
+            break;
+        case XpControllerStage::EvaluateLobby:
+            BroadcastXpControllerSummary();
+            if (AllConnectedPlayersEarnedXp()) {
+                for (auto& [playerId, tracked] : xpTrackedPlayers) {
+                    tracked.rollover_complete = false;
+                }
+                BeginXpRolloverRound();
+            }
+            else {
+                BeginXpFarmingRound();
+            }
+            break;
+        }
+    }
 
     enum Groups {
         Player,
@@ -145,10 +774,82 @@ namespace PlayersTab {
         protectionTargetIndex = 0;
     }
 
-        void ReapplyProtectionNow() {
+    void ReapplyProtectionNow() {
         if (!protectionToggleUiEnabled) return;
         lastProtectionTime = std::chrono::steady_clock::now() -
             std::chrono::milliseconds((std::max)(protectionIntervalMs, 1));
+    }
+
+    static void ToggleProtection(bool crewmatesOnly) {
+        if (protectionToggleUiEnabled) {
+            if (protectionCrewmatesOnly == crewmatesOnly) {
+                StopProtectionLoop();
+            }
+            else {
+                protectionCrewmatesOnly = crewmatesOnly;
+                protectionTargetIndex = 0;
+                lastProtectionTime = std::chrono::steady_clock::now() -
+                    std::chrono::milliseconds((std::max)(protectionIntervalMs, 1));
+            }
+            return;
+        }
+
+        if (protectionTargets.empty()) {
+            for (auto playerId : State.selectedPlayers) protectionTargets.push_back(playerId);
+        }
+        if (!protectionTargets.empty()) {
+            protectionTargetIndex = 0;
+            protectionCrewmatesOnly = crewmatesOnly;
+            protectionToggleUiEnabled = true;
+            lastProtectionTime = std::chrono::steady_clock::now() -
+                std::chrono::milliseconds((std::max)(protectionIntervalMs, 1));
+        }
+    }
+
+    static void SetShieldState(Game::PlayerId playerId, bool enabled) {
+        if (enabled) {
+            if (!matchCycleProtectionOwnsSettings) {
+                matchCyclePreviousProtectionEnabled = protectionToggleUiEnabled;
+                matchCyclePreviousCrewmatesOnly = protectionCrewmatesOnly;
+                matchCyclePreviousProtectionIntervalMs = protectionIntervalMs;
+                matchCyclePreviousProtectionTargets = protectionTargets;
+                matchCycleProtectionOwnsSettings = true;
+                protectionTargets.clear();
+            }
+
+            if (std::find(protectionTargets.begin(), protectionTargets.end(), playerId) == protectionTargets.end()) {
+                protectionTargets.push_back(playerId);
+            }
+            protectionIntervalMs = matchCycleProtectionIntervalMs;
+            if (!protectionToggleUiEnabled) {
+                ToggleProtection(true);
+            }
+            else {
+                protectionCrewmatesOnly = true;
+                ReapplyProtectionNow();
+            }
+            return;
+        }
+
+        if (!matchCycleProtectionOwnsSettings) return;
+        protectionTargets.erase(
+            std::remove(protectionTargets.begin(), protectionTargets.end(), playerId),
+            protectionTargets.end());
+        if (protectionTargets.empty()) {
+            StopProtectionLoop();
+        }
+    }
+
+    static void RestoreMatchCycleProtectionSettings() {
+        if (!matchCycleProtectionOwnsSettings) return;
+        protectionTargets = std::move(matchCyclePreviousProtectionTargets);
+        protectionIntervalMs = matchCyclePreviousProtectionIntervalMs;
+        protectionCrewmatesOnly = matchCyclePreviousCrewmatesOnly;
+        protectionToggleUiEnabled = matchCyclePreviousProtectionEnabled;
+        protectionTargetIndex = 0;
+        matchCycleProtectionOwnsSettings = false;
+        if (protectionToggleUiEnabled) ReapplyProtectionNow();
+        else StopProtectionLoop();
     }
     
     void ClearProtectionTargets() {
@@ -243,32 +944,6 @@ namespace PlayersTab {
     }
 
     void RenderProtectionControls() {
-        auto toggleProtection = [](bool crewmatesOnly) {
-            if (protectionToggleUiEnabled) {
-                if (protectionCrewmatesOnly == crewmatesOnly) {
-                    StopProtectionLoop();
-                }
-                else {
-                    protectionCrewmatesOnly = crewmatesOnly;
-                    protectionTargetIndex = 0;
-                    lastProtectionTime = std::chrono::steady_clock::now() -
-                        std::chrono::milliseconds((std::max)(protectionIntervalMs, 1));
-                }
-                return;
-            }
-
-            if (protectionTargets.empty()) {
-                for (auto playerId : State.selectedPlayers) protectionTargets.push_back(playerId);
-            }
-            if (!protectionTargets.empty()) {
-                protectionTargetIndex = 0;
-                protectionCrewmatesOnly = crewmatesOnly;
-                protectionToggleUiEnabled = true;
-                lastProtectionTime = std::chrono::steady_clock::now() -
-                    std::chrono::milliseconds((std::max)(protectionIntervalMs, 1));
-            }
-        };
-
         auto allPlayers = GetAllPlayerControl();
         protectionTargets.erase(
             std::remove_if(protectionTargets.begin(), protectionTargets.end(), [&](Game::PlayerId playerId) {
@@ -319,8 +994,8 @@ namespace PlayersTab {
             }
             ImGui::EndCombo();
         }
-        if (AnimatedButton("Toggle Protection")) toggleProtection(false);
-        if (AnimatedButton("Toggle Crew Protection")) toggleProtection(true);
+        if (AnimatedButton("Toggle Protection")) ToggleProtection(false);
+        if (AnimatedButton("Toggle Crew Protection")) ToggleProtection(true);
         ImGui::SetNextItemWidth(120 * State.dpiScale);
         ImGui::InputInt("##protectionIntervalMs", &protectionIntervalMs, 1, 10);
         ImGui::SameLine();

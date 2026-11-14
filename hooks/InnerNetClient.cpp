@@ -165,6 +165,7 @@ void dInnerNetClient_Update(InnerNetClient* __this, MethodInfo* method) {
     try {
         // Tick outside the lobby too, so loss of host authority cancels the run.
         DrainXp::Tick();
+        PlayersTab::TickXpController();
         drainXpInFlight = DrainXp::GetRunningStatus() != 0;
         DrainXpV2::Tick();
 
