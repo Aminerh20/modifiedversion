@@ -79,8 +79,10 @@ namespace PlayersTab {
     static std::chrono::steady_clock::time_point xpTransitionGraceDeadline;
     static std::chrono::steady_clock::time_point xpParticipantWaitStarted;
     static std::chrono::steady_clock::time_point xpHostAuthorityLostAt;
+    static std::chrono::steady_clock::time_point xpPostChatDeadline;
     static XpControllerStage xpStageBeforeParticipantWait = XpControllerStage::PreparingRound;
     static constexpr auto xpRoundPrepareDelay = std::chrono::seconds(1);
+    static constexpr auto xpPostChatReadDelay = std::chrono::seconds(7);
     static int xpFarmingDurationSeconds = 180;
     static constexpr auto xpRolloverDuration = std::chrono::seconds(35);
     static constexpr auto xpRejoinWindow = std::chrono::seconds(30);
@@ -223,6 +225,7 @@ namespace PlayersTab {
         constexpr size_t maxChatLength = 110;
         if (message.size() <= maxChatLength) {
             PlayerControl_RpcSendChat(*Game::pLocalPlayer, convert_to_string(message), NULL);
+            xpPostChatDeadline = std::chrono::steady_clock::now() + xpPostChatReadDelay;
             return;
         }
 
@@ -234,6 +237,7 @@ namespace PlayersTab {
                 if (lastSpace != std::string::npos && lastSpace > start) end = lastSpace;
             }
             PlayerControl_RpcSendChat(*Game::pLocalPlayer, convert_to_string(message.substr(start, end - start)), NULL);
+            xpPostChatDeadline = std::chrono::steady_clock::now() + xpPostChatReadDelay;
             start = end;
             while (start < message.size() && message[start] == ' ') ++start;
         }
@@ -352,6 +356,10 @@ namespace PlayersTab {
                     rejoinRequests.push_back(player->fields.PlayerId);
                 }
             }
+            LogXpControllerEvent(std::format(
+                "XP progress: player='{}' id={} host=false levelAtStart={} levelNow={} increased={} farmingComplete={} rolloverComplete={} needsRejoin={}.",
+                tracked.name, player->fields.PlayerId, tracked.level_at_match_start, data->fields.PlayerLevel,
+                leveledUp, tracked.has_completed_objective, tracked.rollover_complete, tracked.needs_rejoin));
         }
         return rejoinRequests;
     }
@@ -490,9 +498,6 @@ namespace PlayersTab {
             auto& tracked = xpTrackedPlayers[playerId];
             tracked.is_host = IsMatchCycleHost(player);
             tracked.is_impostor = std::find(impostors.begin(), impostors.end(), player) != impostors.end();
-            State.lobbyRpcQueue.push(new RpcSetRole(
-                player,
-                tracked.is_impostor ? RoleTypes__Enum::Impostor : RoleTypes__Enum::Crewmate));
             auto data = GetPlayerData(player);
             if (!tracked.is_impostor && data != nullptr && !data->fields.IsDead) defenders.push_back(player);
         }
@@ -608,12 +613,47 @@ namespace PlayersTab {
             StopXpController("Could not start the next match; host or lobby was lost.");
             return;
         }
+        const auto now = std::chrono::steady_clock::now();
+        if (now < xpPostChatDeadline) return;
         LogXpControllerEvent(std::format(
             "Sending match start. {}",
             BuildXpControllerDiagnostics()));
         InnerNetClient_SendStartGame((InnerNetClient*)(*Game::pAmongUsClient), NULL);
         xpControllerStage = XpControllerStage::AwaitingMatch;
         xpControllerDeadline = std::chrono::steady_clock::now() + xpStageTimeout;
+    }
+
+    bool AssignXpControllerRoles() {
+        if (!IsXpControllerRunning() || !IsHost()) return false;
+
+        SynchronizeXpPlayers();
+        size_t assignedPlayers = 0;
+        size_t assignedImpostors = 0;
+        bool hostAssigned = false;
+        for (auto player : GetConnectedXpPlayers()) {
+            const bool isHost = IsMatchCycleHost(player);
+            auto tracked = xpTrackedPlayers.find(player->fields.PlayerId);
+            const bool isImpostor = !isHost
+                && tracked != xpTrackedPlayers.end()
+                && tracked->second.is_impostor;
+            PlayerControl_RpcSetRole(player,
+                isImpostor ? RoleTypes__Enum::Impostor : RoleTypes__Enum::Crewmate, false, NULL);
+            if (tracked != xpTrackedPlayers.end()) {
+                tracked->second.is_host = isHost;
+                tracked->second.is_impostor = isImpostor;
+            }
+            hostAssigned = hostAssigned || isHost;
+            ++assignedPlayers;
+            if (isImpostor) ++assignedImpostors;
+        }
+        if (!hostAssigned && Game::pLocalPlayer != nullptr && *Game::pLocalPlayer != nullptr) {
+            PlayerControl_RpcSetRole(*Game::pLocalPlayer, RoleTypes__Enum::Crewmate, false, NULL);
+            ++assignedPlayers;
+        }
+        LogXpControllerEvent(std::format(
+            "Applied Match Cycle roles at role selection: assignedPlayers={}, impostors={}, hostExplicitlyCrewmate={}. {}",
+            assignedPlayers, assignedImpostors, true, BuildXpControllerDiagnostics()));
+        return true;
     }
 
     static void ForceEndXpMatch() {

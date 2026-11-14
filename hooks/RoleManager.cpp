@@ -5,11 +5,13 @@
 #include "logger.h"
 #include "utility.h"
 #include "game.h"
+#include "../gui/tabs/players_tab.h"
 
 static int preChosenImpCount = 0;
 
 void dRoleManager_SelectRoles(RoleManager* __this, MethodInfo* method) {
 	if (State.ShowHookLogs) Log.HookDebug("Hook dRoleManager_SelectRoles executed", false);
+	if (PlayersTab::AssignXpControllerRoles()) return;
 	if (State.DisableRoleManager) return RoleManager_SelectRoles(__this, method);
 	std::vector<uint8_t> assignedPlayers;
 	GameOptions options;

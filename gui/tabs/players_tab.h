@@ -40,6 +40,7 @@ namespace PlayersTab {
 	void StartXpController();
 	void StopXpController();
 	bool IsXpControllerRunning();
+	bool AssignXpControllerRoles();
 	int GetXpFarmingDurationSeconds();
 	void SetXpFarmingDurationSeconds(int seconds);
 	void TickXpController();
