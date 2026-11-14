@@ -188,7 +188,8 @@ void dInnerNetClient_Update(InnerNetClient* __this, MethodInfo* method) {
             // Force End After Auto Start: counts from the moment auto-start
             // fired, and ends the round after the chosen delay, regardless of
             // whether the game has finished loading.
-            if (IsHost() && State.ForceEndAfterAutoStart && State.ForceEndAfterStartTriggered) {
+            if (IsHost() && State.ForceEndAfterAutoStart && State.ForceEndAfterStartTriggered
+                && !PlayersTab::IsXpControllerRunning()) {
                 State.ForceEndAfterStartTimer += Time_get_deltaTime(NULL);
                 if (State.ForceEndAfterStartTimer >= (float)State.ForceEndAfterStartSeconds) {
                     State.ForceEndAfterStartTriggered = false;
@@ -319,7 +320,8 @@ void dInnerNetClient_Update(InnerNetClient* __this, MethodInfo* method) {
                     (*Game::pLocalPlayer)->fields.moveable = true;
                 }
 
-                if (IsHost() && State.GameLoaded && State.UseGameModeDuration && !State.GameModeDurationOver) {
+                if (IsHost() && State.GameLoaded && State.UseGameModeDuration && !State.GameModeDurationOver
+                    && !PlayersTab::IsXpControllerRunning()) {
                     State.GameModeDurationTimer += Time_get_deltaTime(NULL);
                     if (State.GameModeDurationTimer >= (float)State.GameModeDuration) {
                         State.GameModeDurationOver = true; 
@@ -810,7 +812,8 @@ void dInnerNetClient_Update(InnerNetClient* __this, MethodInfo* method) {
                     State.VoteImmunePlayers.clear();
                 }
                 
-                if (IsHost() && IsInLobby() && State.AutoStartGame && (600 - State.LobbyTimer) >= State.AutoStartTimer && !autoStartedGame && !drainXpInFlight) {
+                if (IsHost() && IsInLobby() && State.AutoStartGame && (600 - State.LobbyTimer) >= State.AutoStartTimer
+                    && !autoStartedGame && !drainXpInFlight && !PlayersTab::IsXpControllerRunning()) {
                     autoStartedGame = true;
                     InnerNetClient_SendStartGame(__this, NULL);
                     if (State.ForceEndAfterAutoStart) {
@@ -821,7 +824,7 @@ void dInnerNetClient_Update(InnerNetClient* __this, MethodInfo* method) {
 
 
 
-                if (IsHost() && IsInGame() && State.AutoKickSlackers) {
+                if (IsHost() && IsInGame() && State.AutoKickSlackers && !PlayersTab::IsXpControllerRunning()) {
                     slackerTimer += Time_get_deltaTime(NULL);
                     if (slackerTimer >= (float)State.AutoKickSlackersGrace) {
                         for (auto pc : GetAllPlayerControl()) {
@@ -1077,7 +1080,7 @@ void dInnerNetClient_Update(InnerNetClient* __this, MethodInfo* method) {
             }
         }
 
-        if (State.AutoKickBelowLevel || State.AutoBanBelowLevel) {
+        if ((State.AutoKickBelowLevel || State.AutoBanBelowLevel) && !PlayersTab::IsXpControllerRunning()) {
             if (State.PanicMode || !IsHost() || !IsInLobby() ||
                 Game::pAmongUsClient == nullptr || *Game::pAmongUsClient == nullptr) {
                 autoLevelPunishmentAttempted.clear();

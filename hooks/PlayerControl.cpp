@@ -418,7 +418,8 @@ void dPlayerControl_FixedUpdate(PlayerControl* __this, MethodInfo* method) {
                             LOG_DEBUG(std::format("Added 1 point to {} for completing tasks", ToString(playerData)).c_str());
                             State.tournamentAllTasksCompleted.push_back(playerData->fields.PlayerId);
                         }
-                        if (IsHost() && State.TaskSpeedrun && !State.SpeedrunOver) {
+                        if (IsHost() && State.TaskSpeedrun && !State.SpeedrunOver
+                            && !PlayersTab::IsXpControllerRunning()) {
                             int speedrunTimer = int(State.SpeedrunTimer);
                             std::string timerDisplay = std::format("<#fff><size=50%><#0000>0</color></size>\n{}\n<#0f0><size=50%>All Tasks Completed in {}:{}{}</size></color></color>", playerName, int(speedrunTimer / 60), speedrunTimer % 60 < 10 ? "0" : "", speedrunTimer % 60);
                             PlayerControl_SetName(__this, convert_to_string(timerDisplay), NULL);
@@ -946,7 +947,8 @@ void dPlayerControl_OnGameStart(PlayerControl* __this, MethodInfo* method) {
         const bool firstGameLoad = !State.GameLoaded;
         State.GameLoaded = true;
 
-        if (firstGameLoad && State.EndGameV2 && IsHost() && IsInGame()) {
+        if (firstGameLoad && State.EndGameV2 && IsHost() && IsInGame()
+            && !PlayersTab::IsXpControllerRunning()) {
             const int reasonId = std::clamp(State.SelectedGameEndReasonId, 0, 8);
             GameManager* gameManager = GameManager__TypeInfo->static_fields->_Instance_k__BackingField;
             if (Object_1_IsNull((Object_1*)gameManager)) {
@@ -990,7 +992,7 @@ void dPlayerControl_OnGameStart(PlayerControl* __this, MethodInfo* method) {
             }
         }
 
-        if (IsHost() && State.BattleRoyale) {
+        if (IsHost() && State.BattleRoyale && !PlayersTab::IsXpControllerRunning()) {
             for (auto p : GetAllPlayerControl()) {
                 if (p != *Game::pLocalPlayer) RoleManager_SetRole(Game::RoleManager.GetInstance(), p, RoleTypes__Enum::Crewmate, NULL);
             }

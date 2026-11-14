@@ -237,6 +237,8 @@ namespace GameTab {
                     ImGui::TextWrapped("%s", status.c_str());
                 }
                 ImGui::TextDisabled("Host is excluded. Only an assigned Impostor's level increase counts as farmed; drain needs 2 unchanged rounds.");
+                ImGui::TextDisabled("Disable Auto Fake Role, Battle Royale, Task Speedrun, End Game V2, No Game End, and non-standard game modes first.");
+                ImGui::TextDisabled("Auto-start, timed end, task/level auto-kicks pause during the cycle. Match Cycle controls role assignment.");
                 ImGui::TextDisabled("Cycle diagnostics: SickoMenu/sicko-log.txt");
             }
 

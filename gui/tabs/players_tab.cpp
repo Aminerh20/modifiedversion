@@ -67,7 +67,10 @@ namespace PlayersTab {
         bool connected = false;
         bool disconnected_after_rejoin_request = false;
         bool has_match_snapshot = false;
+        bool was_impostor_this_round = false;
+        bool farmed_this_round = false;
         uint32_t level_at_match_start = 0;
+        uint32_t level_after_last_round = 0;
         uint32_t levels_gained_last_round = 0;
         uint32_t consecutive_no_level_rounds = 0;
         std::string name;
@@ -193,10 +196,11 @@ namespace PlayersTab {
 
             const auto& state = tracked->second;
             details += std::format(
-                "; player[{}]='{}' host={} dead={} level={} snapshot={} objectiveComplete={} impostor={} shielded={} needsRejoin={} rolloverComplete={} unchangedDrainRounds={}",
+                "; player[{}]='{}' host={} dead={} level={} snapshot={} lastRoundLevel={} roundImpostor={} farmedThisRound={} objectiveComplete={} impostor={} shielded={} needsRejoin={} rolloverComplete={} unchangedDrainRounds={}",
                 playerId, name, state.is_host, data != nullptr && data->fields.IsDead,
-                data != nullptr ? data->fields.PlayerLevel : 0, state.level_at_match_start,
-                state.has_completed_objective, state.is_impostor, state.is_shielded,
+                data != nullptr ? data->fields.PlayerLevel : 0, state.level_at_match_start, state.level_after_last_round,
+                state.was_impostor_this_round, state.farmed_this_round, state.has_completed_objective,
+                state.is_impostor, state.is_shielded,
                 state.needs_rejoin, state.rollover_complete, state.consecutive_no_level_rounds);
         }
         for (const auto& [playerId, state] : xpTrackedPlayers) {
@@ -206,9 +210,11 @@ namespace PlayersTab {
                 });
             if (currentlyConnected) continue;
             details += std::format(
-                "; player[{}]='{}' disconnected=true host={} objectiveComplete={} impostor={} shielded={} needsRejoin={} rolloverComplete={} unchangedDrainRounds={}",
-                playerId, state.name, state.is_host, state.has_completed_objective, state.is_impostor,
-                state.is_shielded, state.needs_rejoin, state.rollover_complete, state.consecutive_no_level_rounds);
+                "; player[{}]='{}' disconnected=true host={} lastRoundLevel={} roundImpostor={} farmedThisRound={} objectiveComplete={} impostor={} shielded={} needsRejoin={} rolloverComplete={} unchangedDrainRounds={}",
+                playerId, state.name, state.is_host, state.level_after_last_round,
+                state.was_impostor_this_round, state.farmed_this_round,
+                state.has_completed_objective, state.is_impostor, state.is_shielded,
+                state.needs_rejoin, state.rollover_complete, state.consecutive_no_level_rounds);
         }
         return details;
     }
@@ -274,11 +280,8 @@ namespace PlayersTab {
         std::vector<std::string> stillNeedFarming;
         for (const auto playerId : participantIds) {
             const auto& tracked = xpTrackedPlayers.at(playerId);
-            if (tracked.is_impostor && tracked.has_completed_objective) {
-                farmedThisRound.push_back(std::format(
-                    "{} (+{} level{}; exact XP unavailable)",
-                    tracked.name, tracked.levels_gained_last_round,
-                    tracked.levels_gained_last_round == 1 ? "" : "s"));
+            if (tracked.was_impostor_this_round && tracked.farmed_this_round) {
+                farmedThisRound.push_back(tracked.name);
             }
             if (!tracked.has_completed_objective) stillNeedFarming.push_back(tracked.name);
         }
@@ -327,7 +330,15 @@ namespace PlayersTab {
             auto& tracked = xpTrackedPlayers[player->fields.PlayerId];
             tracked.name = XpPlayerName(player);
             tracked.level_at_match_start = data->fields.PlayerLevel;
+            tracked.level_after_last_round = data->fields.PlayerLevel;
+            tracked.was_impostor_this_round = tracked.is_impostor && !tracked.is_host;
+            tracked.farmed_this_round = false;
             tracked.has_match_snapshot = true;
+            LogXpControllerEvent(std::format(
+                "Round snapshot: player='{}' id={} role={} levelAtStart={} host={} completedBeforeRound={}.",
+                tracked.name, player->fields.PlayerId,
+                tracked.was_impostor_this_round ? "Impostor" : "Crewmate",
+                tracked.level_at_match_start, tracked.is_host, tracked.has_completed_objective));
         }
     }
 
@@ -345,13 +356,17 @@ namespace PlayersTab {
             tracked.levels_gained_last_round = leveledUp
                 ? data->fields.PlayerLevel - tracked.level_at_match_start
                 : 0;
+            tracked.level_after_last_round = data->fields.PlayerLevel;
             tracked.is_host = IsMatchCycleHost(player);
             if (tracked.is_host) continue;
 
             if (farmingRound) {
-                if (tracked.is_impostor) {
-                    tracked.has_earned_xp = leveledUp;
-                    tracked.has_completed_objective = leveledUp;
+                if (tracked.was_impostor_this_round) {
+                    tracked.farmed_this_round = leveledUp;
+                    if (leveledUp) {
+                        tracked.has_earned_xp = true;
+                        tracked.has_completed_objective = true;
+                    }
                 }
             }
             else if (!tracked.rollover_complete) {
@@ -371,9 +386,12 @@ namespace PlayersTab {
                 }
             }
             LogXpControllerEvent(std::format(
-                "XP progress: player='{}' id={} host=false impostor={} levelAtStart={} levelNow={} increased={} farmingComplete={} rolloverComplete={} unchangedDrainRounds={} needsRejoin={}.",
-                tracked.name, player->fields.PlayerId, tracked.is_impostor, tracked.level_at_match_start,
-                data->fields.PlayerLevel, leveledUp, tracked.has_completed_objective,
+                "XP progress: player='{}' id={} host=false roundRole={} currentRole={} levelAtStart={} levelNow={} levelsGained={} increased={} farmedThisRound={} farmingComplete={} rolloverComplete={} unchangedDrainRounds={} needsRejoin={}.",
+                tracked.name, player->fields.PlayerId,
+                tracked.was_impostor_this_round ? "Impostor" : "Crewmate",
+                tracked.is_impostor ? "Impostor" : "Crewmate",
+                tracked.level_at_match_start, data->fields.PlayerLevel, tracked.levels_gained_last_round,
+                leveledUp, tracked.farmed_this_round, tracked.has_completed_objective,
                 tracked.rollover_complete, tracked.consecutive_no_level_rounds, tracked.needs_rejoin));
         }
         return rejoinRequests;
@@ -665,7 +683,7 @@ namespace PlayersTab {
             auto tracked = xpTrackedPlayers.find(player->fields.PlayerId);
             const bool isImpostor = !isHost
                 && tracked != xpTrackedPlayers.end()
-                && tracked->second.is_impostor;
+                && tracked->second.was_impostor_this_round;
             PlayerControl_RpcSetRole(player,
                 isImpostor ? RoleTypes__Enum::Impostor : RoleTypes__Enum::Crewmate, false, NULL);
             if (tracked != xpTrackedPlayers.end()) {
@@ -807,9 +825,30 @@ namespace PlayersTab {
             Toasts::AddToast("XP Controller", "Stop the other XP loop before starting this controller.", ImVec4(1.f, 0.3f, 0.3f, 1.f));
             return;
         }
+        std::vector<std::string> conflictingSettings;
+        if (State.AutoFakeRole) conflictingSettings.push_back("Auto Fake Role");
+        if (State.BattleRoyale) conflictingSettings.push_back("Battle Royale");
+        if (State.TaskSpeedrun) conflictingSettings.push_back("Task Speedrun");
+        if (State.EndGameV2) conflictingSettings.push_back("End Game V2");
+        if (State.NoGameEnd) conflictingSettings.push_back("No Game End");
+        if (State.GameMode != 0) conflictingSettings.push_back("a non-standard game mode");
+        if (!conflictingSettings.empty()) {
+            std::string settingsList;
+            for (const auto& setting : conflictingSettings) {
+                if (!settingsList.empty()) settingsList += ", ";
+                settingsList += setting;
+            }
+            Toasts::AddToast(
+                "XP Controller",
+                std::format("Disable {} before starting Match Cycle.", settingsList),
+                ImVec4(1.f, 0.3f, 0.3f, 1.f));
+            LogXpControllerEvent(std::format("Start blocked by conflicting settings: {}.", settingsList));
+            return;
+        }
 
         xpTrackedPlayers.clear();
         xpHasFarmingRotationCursor = false;
+        State.ForceEndAfterStartTriggered = false;
         for (auto player : GetConnectedXpPlayers()) {
             auto& tracked = xpTrackedPlayers[player->fields.PlayerId];
             tracked.name = XpPlayerName(player);
