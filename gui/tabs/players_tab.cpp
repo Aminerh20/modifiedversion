@@ -78,6 +78,7 @@ namespace PlayersTab {
     static std::chrono::steady_clock::time_point xpLastRosterCheck;
     static std::chrono::steady_clock::time_point xpTransitionGraceDeadline;
     static std::chrono::steady_clock::time_point xpParticipantWaitStarted;
+    static std::chrono::steady_clock::time_point xpHostAuthorityLostAt;
     static XpControllerStage xpStageBeforeParticipantWait = XpControllerStage::PreparingRound;
     static constexpr auto xpRoundPrepareDelay = std::chrono::seconds(1);
     static constexpr auto xpFarmingDuration = std::chrono::seconds(180);
@@ -85,6 +86,7 @@ namespace PlayersTab {
     static constexpr auto xpRejoinWindow = std::chrono::seconds(30);
     static constexpr auto xpLobbyDelay = std::chrono::seconds(20);
     static constexpr auto transitionGraceDuration = std::chrono::seconds(10);
+    static constexpr auto xpHostAuthorityGraceDuration = std::chrono::seconds(10);
     static constexpr auto xpStageTimeout = std::chrono::seconds(60);
     static constexpr auto xpRosterCheckInterval = std::chrono::milliseconds(70);
 
@@ -397,6 +399,7 @@ namespace PlayersTab {
             reason, BuildXpControllerDiagnostics()));
         xpControllerPhase = XpControllerPhase::STOPPED;
         xpControllerStage = XpControllerStage::PreparingRound;
+        xpHostAuthorityLostAt = {};
         for (auto& [playerId, tracked] : xpTrackedPlayers) {
             if (tracked.is_shielded) SetShieldState(playerId, false);
         }
@@ -708,6 +711,7 @@ namespace PlayersTab {
         xpControllerPhase = XpControllerPhase::FARMING_ROUND;
         xpLastRosterCheck = std::chrono::steady_clock::now();
         xpTransitionGraceDeadline = xpLastRosterCheck;
+        xpHostAuthorityLostAt = {};
         LogXpControllerEvent(std::format("Match Cycle started. {}", BuildXpControllerDiagnostics()));
         BeginXpFarmingRound();
         Toasts::AddToast("XP Controller", "Starting the farming rounds.", ImVec4(0.f, 1.f, 0.5f, 1.f));
@@ -719,6 +723,13 @@ namespace PlayersTab {
 
     std::string GetXpControllerStatus() {
         if (!IsXpControllerRunning()) return "Stopped";
+        if (xpHostAuthorityLostAt != std::chrono::steady_clock::time_point{}) {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - xpHostAuthorityLostAt).count();
+            const auto graceRemaining = (std::max)(0LL,
+                std::chrono::duration_cast<std::chrono::seconds>(xpHostAuthorityGraceDuration).count() - elapsed);
+            return std::format("Waiting for host authority - {}s grace", graceRemaining);
+        }
         const auto remaining = (std::max)(0LL,
             std::chrono::duration_cast<std::chrono::seconds>(
                 xpControllerDeadline - std::chrono::steady_clock::now()).count());
@@ -738,11 +749,29 @@ namespace PlayersTab {
             StopXpController("Stopped because panic mode was enabled.");
             return;
         }
+        const auto now = std::chrono::steady_clock::now();
         if (!IsHost()) {
-            StopXpController("Stopped because host authority was lost.");
+            if (xpHostAuthorityLostAt == std::chrono::steady_clock::time_point{}) {
+                xpHostAuthorityLostAt = now;
+                LogXpControllerEvent(std::format(
+                    "Host authority temporarily unavailable; pausing cycle for up to {}s. {}",
+                    std::chrono::duration_cast<std::chrono::seconds>(xpHostAuthorityGraceDuration).count(),
+                    BuildXpControllerDiagnostics()));
+            }
+            if (now - xpHostAuthorityLostAt >= xpHostAuthorityGraceDuration) {
+                StopXpController("Stopped because host authority was not restored within the 10-second grace period.");
+            }
             return;
         }
-        const auto now = std::chrono::steady_clock::now();
+        if (xpHostAuthorityLostAt != std::chrono::steady_clock::time_point{}) {
+            const auto authorityPause = now - xpHostAuthorityLostAt;
+            xpControllerDeadline += authorityPause;
+            LogXpControllerEvent(std::format(
+                "Host authority restored; resuming cycle and extending timer by {}ms. {}",
+                std::chrono::duration_cast<std::chrono::milliseconds>(authorityPause).count(),
+                BuildXpControllerDiagnostics()));
+            xpHostAuthorityLostAt = {};
+        }
         const bool inLobby = IsInLobby();
         const bool transitioningToLobby = inLobby
             && (xpControllerStage == XpControllerStage::MatchTimer
@@ -1060,7 +1089,12 @@ namespace PlayersTab {
 
     void TickProtectionLoop() {
         if (!protectionToggleUiEnabled) return;
-        if (!(IsInGame() || IsInLobby()) || protectionTargets.empty()) {
+        if (protectionTargets.empty()) {
+            StopProtectionLoop();
+            return;
+        }
+        if (!(IsInGame() || IsInLobby())) {
+            if (matchCycleProtectionOwnsSettings && IsXpControllerRunning()) return;
             StopProtectionLoop();
             return;
         }
@@ -1074,6 +1108,9 @@ namespace PlayersTab {
 
         bool canForce = (IsHost() && IsInGame()) || !State.SafeMode;
         if (!canForce) {
+            if (matchCycleProtectionOwnsSettings && IsXpControllerRunning()) {
+                return;
+            }
             StopProtectionLoop();
             return;
         }
