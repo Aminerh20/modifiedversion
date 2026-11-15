@@ -53,7 +53,7 @@ namespace UiUpdateQueue {
 		}
 
 		for (const auto& update : lobbyChat) {
-			auto sourcePlayer = GetPlayerControlById(update.sourcePlayerId);
+			app::PlayerControl* sourcePlayer = GetPlayerControlById(update.sourcePlayerId);
 			if (sourcePlayer == nullptr) {
 				Log.Info("UI UPDATE QUEUE", "Dropped a queued lobby chat message because its sender disconnected.");
 				continue;

@@ -710,11 +710,11 @@ void dChatController_AddChat(ChatController* __this, PlayerControl* sourcePlayer
 }
 
 void ProcessQueuedLobbyChatMessage(
-	ChatController* chat,
-	PlayerControl* sourcePlayer,
-	String* message,
+	app::ChatController* chat,
+	app::PlayerControl* sourcePlayer,
+	app::String* message,
 	bool censor,
-	MethodInfo* method) {
+	::MethodInfo* method) {
 	struct QueuedLobbyChatScope {
 		bool previousState = isProcessingQueuedLobbyChat;
 		QueuedLobbyChatScope() { isProcessingQueuedLobbyChat = true; }

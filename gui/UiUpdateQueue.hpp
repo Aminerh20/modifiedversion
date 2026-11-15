@@ -3,10 +3,13 @@
 #include <cstdint>
 #include <string>
 
-struct ChatController;
-struct PlayerControl;
-struct String;
 struct MethodInfo;
+
+namespace app {
+	struct ChatController;
+	struct PlayerControl;
+	struct String;
+}
 
 namespace UiUpdateQueue {
 	void EnqueueLobbyChat(uint8_t sourcePlayerId, std::string message, bool censor);
@@ -14,8 +17,8 @@ namespace UiUpdateQueue {
 }
 
 void ProcessQueuedLobbyChatMessage(
-	ChatController* chat,
-	PlayerControl* sourcePlayer,
-	String* message,
+	app::ChatController* chat,
+	app::PlayerControl* sourcePlayer,
+	app::String* message,
 	bool censor,
-	MethodInfo* method);
+	::MethodInfo* method);
