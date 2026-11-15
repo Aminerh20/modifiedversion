@@ -6,6 +6,7 @@
 #include "logger.h"
 #include "utility.h"
 #include "gui-helpers.hpp"
+#include "../UiUpdateQueue.hpp"
 #include <future>
 #include <_hooks.h>
 #include <unordered_map>
@@ -83,6 +84,15 @@ namespace PlayersTab {
     static std::chrono::steady_clock::time_point xpPostChatDeadline;
     static std::chrono::steady_clock::time_point xpNextChatSendAt;
     static std::deque<std::string> xpPendingChatMessages;
+    static size_t g_rpcEmittedThisFrame = 0;
+    static constexpr size_t kRpcBudgetPerFrame = 32;
+    static std::vector<Game::PlayerId> xpRolesPendingAssignment;
+    static size_t xpRoleAssignmentCursor = 0;
+    static size_t xpRoleAssignedPlayers = 0;
+    static size_t xpRoleAssignedImpostors = 0;
+    static bool xpRoleHostAssigned = false;
+    static bool xpRoleAssignmentStarted = false;
+    static bool xpRoleAssignmentComplete = false;
     static Game::PlayerId xpFarmingRotationCursor = 0;
     static bool xpHasFarmingRotationCursor = false;
     static XpControllerStage xpStageBeforeParticipantWait = XpControllerStage::PreparingRound;
@@ -283,11 +293,24 @@ namespace PlayersTab {
         if (hasNames || message != "[MATCH CYCLE] " + label) flushMessage();
     }
 
+    static size_t xpChatMessagesSent = 0;
+
     static void TickXpControllerChat() {
         if (xpPendingChatMessages.empty()) return;
 
         const auto now = std::chrono::steady_clock::now();
         if (now < xpNextChatSendAt) return;
+
+        // Match Cycle chat is throttled by the controller's own 2s cadence.
+        // If the frame budget is exhausted we defer the message by one tick
+        // instead of dropping it, because xpPendingChatMessages is the
+        // controller's source of truth for the "chat sent before match start"
+        // barrier (xpPostChatDeadline).
+        if (g_rpcEmittedThisFrame >= kRpcBudgetPerFrame) {
+            xpNextChatSendAt = now + xpChatSendInterval;
+            return;
+        }
+
         const std::string message = std::move(xpPendingChatMessages.front());
         xpPendingChatMessages.pop_front();
         if (!CanSendXpControllerChat()) {
@@ -296,7 +319,9 @@ namespace PlayersTab {
         }
         else {
             PlayerControl_RpcSendChat(*Game::pLocalPlayer, convert_to_string(message), NULL);
-            LogXpControllerEvent(std::format("Sent chat message ({} chars): '{}'.", message.size(), message));
+            ++g_rpcEmittedThisFrame;
+            ++xpChatMessagesSent;
+            LogXpControllerEvent(std::format("Sent chat message ({} chars): '{}' (totalSent={}).", message.size(), message, xpChatMessagesSent));
             xpPostChatDeadline = now + xpPostChatReadDelay;
         }
         xpNextChatSendAt = now + xpChatSendInterval;
@@ -477,6 +502,13 @@ namespace PlayersTab {
         xpControllerStage = XpControllerStage::PreparingRound;
         xpHostAuthorityLostAt = {};
         xpRoundImpostorIds.clear();
+        xpRolesPendingAssignment.clear();
+        xpRoleAssignmentCursor = 0;
+        xpRoleAssignedPlayers = 0;
+        xpRoleAssignedImpostors = 0;
+        xpRoleHostAssigned = false;
+        xpRoleAssignmentStarted = false;
+        xpRoleAssignmentComplete = false;
         xpDrainRoundsCompleted = 0;
         xpDrainRoundsTarget = 0;
         for (auto& [playerId, tracked] : xpTrackedPlayers) {
@@ -509,6 +541,13 @@ namespace PlayersTab {
         }
 
         xpRoundImpostorIds.clear();
+        xpRolesPendingAssignment.clear();
+        xpRoleAssignmentCursor = 0;
+        xpRoleAssignedPlayers = 0;
+        xpRoleAssignedImpostors = 0;
+        xpRoleHostAssigned = false;
+        xpRoleAssignmentStarted = false;
+        xpRoleAssignmentComplete = false;
         for (auto& [playerId, tracked] : xpTrackedPlayers) {
             tracked.was_impostor_this_round = false;
             tracked.farmed_this_round = false;
@@ -686,6 +725,15 @@ namespace PlayersTab {
             desiredShields.push_back(player->fields.PlayerId);
         }
 
+        static std::vector<Game::PlayerId> lastDesiredShields;
+        static std::chrono::steady_clock::time_point lastShieldSendAt{};
+
+        const auto now = std::chrono::steady_clock::now();
+        const bool sameSet = (desiredShields == lastDesiredShields);
+        const bool intervalElapsed =
+            (now - lastShieldSendAt) >= std::chrono::milliseconds(protectionIntervalMs);
+        if (sameSet && !intervalElapsed) return;
+
         bool shieldSetChanged = false;
         for (auto& [playerId, tracked] : xpTrackedPlayers) {
             const bool shouldShield = std::find(desiredShields.begin(), desiredShields.end(), playerId) != desiredShields.end();
@@ -711,6 +759,9 @@ namespace PlayersTab {
                 tracked.is_shielded = true;
             }
         }
+                lastDesiredShields = desiredShields;
+        lastShieldSendAt = now;
+
         if (shieldSetChanged) {
             std::string targets;
             for (const auto playerId : desiredShields) {
@@ -746,45 +797,78 @@ namespace PlayersTab {
             return;
         }
         const auto now = std::chrono::steady_clock::now();
+        if (!xpPendingChatMessages.empty()) return;
         if (now < xpPostChatDeadline) return;
+
+        if (g_rpcEmittedThisFrame >= kRpcBudgetPerFrame) return;
+
         LogXpControllerEvent(std::format(
             "Sending match start. {}",
             BuildXpControllerDiagnostics()));
         InnerNetClient_SendStartGame((InnerNetClient*)(*Game::pAmongUsClient), NULL);
+        ++g_rpcEmittedThisFrame;
         xpControllerStage = XpControllerStage::AwaitingMatch;
         xpControllerDeadline = std::chrono::steady_clock::now() + xpStageTimeout;
+    }
+
+    static void ProcessPendingXpControllerRoles() {
+        if (!IsXpControllerRunning() || !IsHost()
+            || !xpRoleAssignmentStarted || xpRoleAssignmentComplete) return;
+
+        while (xpRoleAssignmentCursor < xpRolesPendingAssignment.size()
+            && g_rpcEmittedThisFrame < kRpcBudgetPerFrame) {
+            const auto playerId = xpRolesPendingAssignment[xpRoleAssignmentCursor++];
+            auto player = GetPlayerControlById(playerId);
+            if (player == nullptr) continue;
+
+            const bool isHost = IsMatchCycleHost(player);
+            auto tracked = xpTrackedPlayers.find(playerId);
+            const bool isImpostor = !isHost
+                && tracked != xpTrackedPlayers.end()
+                && tracked->second.was_impostor_this_round;
+            PlayerControl_RpcSetRole(
+                player,
+                isImpostor ? RoleTypes__Enum::Impostor : RoleTypes__Enum::Crewmate,
+                false,
+                NULL);
+            ++g_rpcEmittedThisFrame;
+            ++xpRoleAssignedPlayers;
+            if (isImpostor) ++xpRoleAssignedImpostors;
+            xpRoleHostAssigned = xpRoleHostAssigned || isHost;
+            if (tracked != xpTrackedPlayers.end()) {
+                tracked->second.is_host = isHost;
+                tracked->second.is_impostor = isImpostor;
+            }
+        }
+
+        if (xpRoleAssignmentCursor == xpRolesPendingAssignment.size()) {
+            xpRoleAssignmentComplete = true;
+            LogXpControllerEvent(std::format(
+                "Applied Match Cycle roles: assignedPlayers={}, impostors={}, hostExplicitlyCrewmate={}. {}",
+                xpRoleAssignedPlayers, xpRoleAssignedImpostors,
+                xpRoleHostAssigned, BuildXpControllerDiagnostics()));
+        }
     }
 
     bool AssignXpControllerRoles() {
         if (!IsXpControllerRunning() || !IsHost()) return false;
 
-        SynchronizeXpPlayers();
-        size_t assignedPlayers = 0;
-        size_t assignedImpostors = 0;
-        bool hostAssigned = false;
-        for (auto player : GetConnectedXpPlayers()) {
-            const bool isHost = IsMatchCycleHost(player);
-            auto tracked = xpTrackedPlayers.find(player->fields.PlayerId);
-            const bool isImpostor = !isHost
-                && tracked != xpTrackedPlayers.end()
-                && tracked->second.was_impostor_this_round;
-            PlayerControl_RpcSetRole(player,
-                isImpostor ? RoleTypes__Enum::Impostor : RoleTypes__Enum::Crewmate, false, NULL);
-            if (tracked != xpTrackedPlayers.end()) {
-                tracked->second.is_host = isHost;
-                tracked->second.is_impostor = isImpostor;
+        if (!xpRoleAssignmentStarted && !xpRoleAssignmentComplete) {
+            SynchronizeXpPlayers();
+            for (auto player : GetConnectedXpPlayers()) {
+                xpRolesPendingAssignment.push_back(player->fields.PlayerId);
             }
-            hostAssigned = hostAssigned || isHost;
-            ++assignedPlayers;
-            if (isImpostor) ++assignedImpostors;
+            if (Game::pLocalPlayer != nullptr && *Game::pLocalPlayer != nullptr) {
+                const auto hostId = (*Game::pLocalPlayer)->fields.PlayerId;
+                if (std::find(xpRolesPendingAssignment.begin(), xpRolesPendingAssignment.end(), hostId)
+                    == xpRolesPendingAssignment.end()) {
+                    xpRolesPendingAssignment.push_back(hostId);
+                }
+            }
+            xpRoleAssignmentStarted = true;
         }
-        if (!hostAssigned && Game::pLocalPlayer != nullptr && *Game::pLocalPlayer != nullptr) {
-            PlayerControl_RpcSetRole(*Game::pLocalPlayer, RoleTypes__Enum::Crewmate, false, NULL);
-            ++assignedPlayers;
-        }
-        LogXpControllerEvent(std::format(
-            "Applied Match Cycle roles at role selection: assignedPlayers={}, impostors={}, hostExplicitlyCrewmate={}. {}",
-            assignedPlayers, assignedImpostors, true, BuildXpControllerDiagnostics()));
+
+        ProcessPendingXpControllerRoles();
         return true;
     }
 
@@ -794,10 +878,17 @@ namespace PlayersTab {
             StopXpController("Could not end the match because the game manager is unavailable.");
             return;
         }
+
+        // End-game is a state transition RPC; defer by one tick if the frame
+        // budget is exhausted rather than racing it against other controller
+        // emissions on the same frame.
+        if (g_rpcEmittedThisFrame >= kRpcBudgetPerFrame) return;
+
         LogXpControllerEvent(std::format(
             "Force-ending match after timer. {}",
             BuildXpControllerDiagnostics()));
         GameManager_RpcEndGame(gameManager, GameOverReason__Enum(0), false, NULL);
+        ++g_rpcEmittedThisFrame;
         xpControllerStage = XpControllerStage::AwaitingLobby;
         xpControllerDeadline = std::chrono::steady_clock::now() + xpStageTimeout;
         xpTransitionGraceDeadline = std::chrono::steady_clock::now() + transitionGraceDuration;
@@ -1003,11 +1094,13 @@ namespace PlayersTab {
     }
 
     void TickXpController() {
+        g_rpcEmittedThisFrame = 0;
         if (!IsXpControllerRunning()) return;
         if (State.PanicMode) {
             StopXpController("Stopped because panic mode was enabled.");
             return;
         }
+        ProcessPendingXpControllerRoles();
         const auto now = std::chrono::steady_clock::now();
         if (!IsHost()) {
             if (xpHostAuthorityLostAt == std::chrono::steady_clock::time_point{}) {
@@ -1383,8 +1476,12 @@ namespace PlayersTab {
             return;
         }
 
-        // protect ALL targets at once on each interval
+        // Protect all targets on each interval, within the frame budget.
+        // If the budget is exhausted mid-list, the remaining targets are picked
+        // up on the next interval (protectionTargets is preserved; the loop is
+        // not destructive).
         for (auto id : protectionTargets) {
+            if (g_rpcEmittedThisFrame >= kRpcBudgetPerFrame) break;
             auto pc = GetPlayerControlById(id);
             if (pc == nullptr) continue;
             auto targetData = GetPlayerData(pc);
@@ -1393,6 +1490,7 @@ namespace PlayersTab {
             auto outfit = GetPlayerOutfit(targetData);
             if (outfit == nullptr) continue;
             PlayerControl_RpcProtectPlayer(*Game::pLocalPlayer, pc, outfit->fields.ColorId, NULL);
+            ++g_rpcEmittedThisFrame;
         }
     }
 
@@ -1426,6 +1524,7 @@ namespace PlayersTab {
         long long elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastKillTime).count();
         const int intervalMs = killIntervalMs;
         if (elapsed < intervalMs) return;
+        if (g_rpcEmittedThisFrame >= kRpcBudgetPerFrame) return;
         lastKillTime = now;
 
         // Ordinary kill attempt on ourselves. This is the direct vanilla kill
@@ -1437,6 +1536,7 @@ namespace PlayersTab {
         // an unprotected self-kill from ever being sent, and the loop stops by
         // itself if we die. Verify the actual outcome in a private lobby.
         PlayerControl_RpcMurderPlayer(*Game::pLocalPlayer, *Game::pLocalPlayer, true, NULL);
+        ++g_rpcEmittedThisFrame;
     }
 
     void RenderProtectionControls() {

@@ -6,10 +6,12 @@
 #include "state.hpp"
 #include "toasts.hpp"
 #include "console.hpp"
+#include "../gui/UiUpdateQueue.hpp"
 #include <regex>
 
 static float copyNotificationTimer = 0.f;
 static bool isTextCut = false;
+static thread_local bool isProcessingQueuedLobbyChat = false;
 
 std::string trim(const std::string& str) {
 	const auto start = str.find_first_not_of(" \t\n\r");
@@ -603,6 +605,11 @@ static bool HandleChatCommand(PlayerControl* actor, const std::string& message) 
 
 void dChatController_AddChat(ChatController* __this, PlayerControl* sourcePlayer, String* chatText, bool censor, MethodInfo* method) {
 	if (State.ShowHookLogs) Log.HookDebug("Hook dChatController_AddChat executed", false);
+	if (!isProcessingQueuedLobbyChat && IsInLobby() && sourcePlayer != nullptr && chatText != nullptr) {
+		UiUpdateQueue::EnqueueLobbyChat(
+			sourcePlayer->fields.PlayerId, convert_from_string(chatText), censor);
+		return;
+	}
 	censor = IsChatCensored(); // Fix chat not being censored
 	if (!State.PanicMode) {
 		auto player = GetPlayerData(sourcePlayer);
@@ -642,6 +649,7 @@ void dChatController_AddChat(ChatController* __this, PlayerControl* sourcePlayer
 				local->fields.IsDead = false;
 			}
 		}
+
 		else {
 			chatText = convert_to_string(newChatText);
 			ChatController_AddChat(__this, sourcePlayer, chatText, censor, method);
@@ -699,6 +707,20 @@ void dChatController_AddChat(ChatController* __this, PlayerControl* sourcePlayer
 	else {
 		ChatController_AddChat(__this, sourcePlayer, chatText, censor, method);
 	}
+}
+
+void ProcessQueuedLobbyChatMessage(
+	ChatController* chat,
+	PlayerControl* sourcePlayer,
+	String* message,
+	bool censor,
+	MethodInfo* method) {
+	struct QueuedLobbyChatScope {
+		bool previousState = isProcessingQueuedLobbyChat;
+		QueuedLobbyChatScope() { isProcessingQueuedLobbyChat = true; }
+		~QueuedLobbyChatScope() { isProcessingQueuedLobbyChat = previousState; }
+	} scope;
+	dChatController_AddChat(chat, sourcePlayer, message, censor, method);
 }
 
 void dChatController_SetVisible(ChatController* __this, bool visible, MethodInfo* method) {

@@ -16,6 +16,9 @@
     <ClCompile Include="gui\gui-helpers.cpp">
       <Filter>gui</Filter>
     </ClCompile>
+    <ClCompile Include="gui\UiUpdateQueue.cpp">
+      <Filter>gui</Filter>
+    </ClCompile>
     <ClCompile Include="gui\menu.cpp">
       <Filter>gui</Filter>
     </ClCompile>
@@ -358,6 +361,9 @@
       <Filter>framework</Filter>
     </ClInclude>
     <ClInclude Include="gui\gui-helpers.hpp">
+      <Filter>gui</Filter>
+    </ClInclude>
+    <ClInclude Include="gui\UiUpdateQueue.hpp">
       <Filter>gui</Filter>
     </ClInclude>
     <ClInclude Include="gui\menu.hpp">

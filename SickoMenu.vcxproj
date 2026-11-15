@@ -51,6 +51,7 @@
     <ClCompile Include="gui\console.cpp" />
     <ClCompile Include="gui\esp.cpp" />
     <ClCompile Include="gui\gui-helpers.cpp" />
+    <ClCompile Include="gui\UiUpdateQueue.cpp" />
     <ClCompile Include="gui\RenderCmd.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release_Version|Win32'">NotUsing</PrecompiledHeader>
@@ -540,6 +541,7 @@
     <ClInclude Include="gui\console.hpp" />
     <ClInclude Include="gui\esp.hpp" />
     <ClInclude Include="gui\gui-helpers.hpp" />
+    <ClInclude Include="gui\UiUpdateQueue.hpp" />
     <ClInclude Include="gui\RenderCmd.hpp" />
     <ClInclude Include="gui\Renderer.hpp" />
     <ClInclude Include="gui\replay.hpp" />

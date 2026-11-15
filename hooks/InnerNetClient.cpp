@@ -14,6 +14,7 @@
 #include <chrono>
 #include "achievements.hpp"
 #include "../gui/tabs/players_tab.h"
+#include "../gui/UiUpdateQueue.hpp"
 #include "../improvements/DrainXp.h"
 #include "../improvements/DrainXpV2.h"
 using namespace std::string_view_literals;
@@ -163,6 +164,7 @@ void RemoveExcessDisabledTasks(std::vector<TaskTypes__Enum> taskList) {
 void dInnerNetClient_Update(InnerNetClient* __this, MethodInfo* method) {
     if (State.ShowHookLogs) Log.HookDebug("Hook dInnerNetClient_Update executed", false);
     try {
+        UiUpdateQueue::ProcessPending();
         // Tick outside the lobby too, so loss of host authority cancels the run.
         DrainXp::Tick();
         PlayersTab::TickXpController();
