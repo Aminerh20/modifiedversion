@@ -224,6 +224,15 @@ namespace GameTab {
                 }
                 ImGui::TextDisabled("Applies to upcoming farming rounds (1-3600 seconds).");
 
+                int drainRoundsPerMinute = PlayersTab::GetXpDrainRoundsPerMinute();
+                ImGui::SetNextItemWidth(180 * State.dpiScale);
+                if (ImGui::InputInt("Drain rounds per farming minute", &drainRoundsPerMinute)) {
+                    PlayersTab::SetXpDrainRoundsPerMinute(drainRoundsPerMinute);
+                }
+                const int drainRoundTarget =
+                    (PlayersTab::GetXpFarmingDurationSeconds() * PlayersTab::GetXpDrainRoundsPerMinute() + 59) / 60;
+                ImGui::TextDisabled("Auto-drain runs this many 35-second rounds, rounded up; then everyone gets a 30-second rejoin window.");
+
                 if (!PlayersTab::IsXpControllerRunning()) {
                     if (AnimatedButton("Start Match Cycle")) {
                         PlayersTab::StartXpController();
@@ -236,7 +245,8 @@ namespace GameTab {
                     const std::string status = PlayersTab::GetXpControllerStatus();
                     ImGui::TextWrapped("%s", status.c_str());
                 }
-                ImGui::TextDisabled("Host is excluded. Assigned Impostors complete farming when a started round returns to the lobby; only drain checks levels (2 unchanged rounds).");
+                ImGui::TextDisabled("Host is excluded. Each assigned Impostor counts after their round returns to the lobby; drain uses a fixed round count, not level checks.");
+                ImGui::TextDisabled("Next auto-drain target: %d rounds.", drainRoundTarget);
                 ImGui::TextDisabled("Disable Auto Fake Role, Battle Royale, Task Speedrun, End Game V2, No Game End, and non-standard game modes first.");
                 ImGui::TextDisabled("Auto-start, timed end, task/level auto-kicks pause during the cycle. Match Cycle controls role assignment.");
                 ImGui::TextDisabled("Cycle diagnostics: SickoMenu/sicko-log.txt");

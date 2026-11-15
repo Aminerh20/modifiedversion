@@ -43,6 +43,8 @@ namespace PlayersTab {
 	bool AssignXpControllerRoles();
 	int GetXpFarmingDurationSeconds();
 	void SetXpFarmingDurationSeconds(int seconds);
+	int GetXpDrainRoundsPerMinute();
+	void SetXpDrainRoundsPerMinute(int rounds);
 	void TickXpController();
 	std::string GetXpControllerStatus();
 	void TickKillLoop();
