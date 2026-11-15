@@ -812,7 +812,6 @@ namespace PlayersTab {
     }
 
     static void StartNextXpCycle() {
-        std::vector<std::string> participantNames;
         for (auto& [playerId, tracked] : xpTrackedPlayers) {
             if (tracked.is_host) continue;
             tracked.has_earned_xp = false;
@@ -821,15 +820,12 @@ namespace PlayersTab {
             tracked.has_farming_attempt = false;
             tracked.needs_rejoin = false;
             tracked.disconnected_after_rejoin_request = false;
-            if (tracked.connected) participantNames.push_back(tracked.name);
         }
         xpRoundImpostorIds.clear();
         xpDrainRoundsCompleted = 0;
         xpDrainRoundsTarget = 0;
-        std::sort(participantNames.begin(), participantNames.end());
-        BroadcastXpControllerPlayerList("NEXT LOOP", participantNames);
         QueueXpControllerChat(std::format(
-            "[MATCH CYCLE] Break shields fast; match auto-ends after {:.1f} min.",
+            "[MATCH CYCLE] Farming resumes: break shields fast; ends in {:.1f} min.",
             static_cast<float>(xpFarmingDurationSeconds) / 60.f));
         LogXpControllerEvent(std::format(
             "Fixed drain-round sequence completed; starting the next full farming cycle. {}",
@@ -966,7 +962,7 @@ namespace PlayersTab {
         xpHostAuthorityLostAt = {};
         LogXpControllerEvent(std::format("Match Cycle started. {}", BuildXpControllerDiagnostics()));
         QueueXpControllerChat(std::format(
-            "[MATCH CYCLE] Break shields fast; match auto-ends after {:.1f} min.",
+            "[MATCH CYCLE] Start farming: break shields fast; ends in {:.1f} min.",
             static_cast<float>(xpFarmingDurationSeconds) / 60.f));
         BeginXpFarmingRound();
         Toasts::AddToast("XP Controller", "Starting the farming rounds.", ImVec4(0.f, 1.f, 0.5f, 1.f));
@@ -1120,13 +1116,12 @@ namespace PlayersTab {
             LogXpControllerEvent(std::format(
                 "Evaluating farming results: allNonHostObjectivesComplete={}. {}",
                 AllConnectedPlayersEarnedXp(), BuildXpControllerDiagnostics()));
-            BroadcastXpControllerSummary();
             if (AllConnectedPlayersEarnedXp()) {
                 xpDrainRoundsCompleted = 0;
                 xpDrainRoundsTarget = GetXpDrainRoundsTarget();
                 xpControllerPhase = XpControllerPhase::ROLLOVER_LOOP;
                 QueueXpControllerChat(std::format(
-                    "[MATCH CYCLE] Drain: {} rounds. 20s to rejoin between rounds or miss next start.",
+                    "[MATCH CYCLE] Farming done: {} drain rounds; 20s to rejoin between rounds.",
                     xpDrainRoundsTarget));
                 LogXpControllerEvent(std::format(
                     "All connected non-host participants completed farming; beginning fixed drain sequence of {} rounds ({} per farming minute, farmingDuration={}s). {}",
@@ -1139,6 +1134,7 @@ namespace PlayersTab {
                 BeginXpRolloverRound();
             }
             else {
+                BroadcastXpControllerSummary();
                 BeginXpFarmingRound();
             }
             break;
