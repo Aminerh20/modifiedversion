@@ -231,7 +231,7 @@ namespace GameTab {
                 }
                 const int drainRoundTarget =
                     (PlayersTab::GetXpFarmingDurationSeconds() * PlayersTab::GetXpDrainRoundsPerMinute() + 59) / 60;
-                ImGui::TextDisabled("Auto-drain runs this many 35-second rounds, rounded up; then everyone gets a 30-second rejoin window.");
+                ImGui::TextDisabled("Auto-drain runs this many 35-second rounds with no Match Cycle protection, then a 30-second rejoin window.");
 
                 if (!PlayersTab::IsXpControllerRunning()) {
                     if (AnimatedButton("Start Match Cycle")) {
@@ -246,6 +246,7 @@ namespace GameTab {
                     ImGui::TextWrapped("%s", status.c_str());
                 }
                 ImGui::TextDisabled("Host is excluded. Each assigned Impostor counts after their round returns to the lobby; drain uses a fixed round count, not level checks.");
+                ImGui::TextDisabled("Cycle notices are sent in chat; matches wait 10 seconds after the last notice before starting.");
                 ImGui::TextDisabled("Next auto-drain target: %d rounds.", drainRoundTarget);
                 ImGui::TextDisabled("Disable Auto Fake Role, Battle Royale, Task Speedrun, End Game V2, No Game End, and non-standard game modes first.");
                 ImGui::TextDisabled("Auto-start, timed end, task/level auto-kicks pause during the cycle. Match Cycle controls role assignment.");

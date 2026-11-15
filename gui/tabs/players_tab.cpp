@@ -11,6 +11,7 @@
 #include <unordered_map>
 #include <algorithm>
 #include <chrono>
+#include <deque>
 #include <string>
 #include <utility>
 #include "../../improvements/DrainXp.h"
@@ -80,11 +81,14 @@ namespace PlayersTab {
     static std::chrono::steady_clock::time_point xpParticipantWaitStarted;
     static std::chrono::steady_clock::time_point xpHostAuthorityLostAt;
     static std::chrono::steady_clock::time_point xpPostChatDeadline;
+    static std::chrono::steady_clock::time_point xpNextChatSendAt;
+    static std::deque<std::string> xpPendingChatMessages;
     static Game::PlayerId xpFarmingRotationCursor = 0;
     static bool xpHasFarmingRotationCursor = false;
     static XpControllerStage xpStageBeforeParticipantWait = XpControllerStage::PreparingRound;
     static constexpr auto xpRoundPrepareDelay = std::chrono::seconds(1);
-    static constexpr auto xpPostChatReadDelay = std::chrono::seconds(7);
+    static constexpr auto xpPostChatReadDelay = std::chrono::seconds(10);
+    static constexpr auto xpChatSendInterval = std::chrono::seconds(2);
     static int xpFarmingDurationSeconds = 180;
     static int xpDrainRoundsPerMinute = 7;
     static int xpDrainRoundsCompleted = 0;
@@ -144,6 +148,11 @@ namespace PlayersTab {
 
     static void LogXpControllerEvent(const std::string& message) {
         Log.Info("MATCH CYCLE", message);
+    }
+
+    static void NotifyXpController(const std::string& title, const std::string& message, ImVec4 color) {
+        LogXpControllerEvent(std::format("{}: {}", title, message));
+        Toasts::AddToast(title, message, color);
     }
 
     static std::vector<PlayerControl*> GetConnectedXpPlayers() {
@@ -222,46 +231,75 @@ namespace PlayersTab {
             && Game::HudManager.GetInstance()->fields.Chat != nullptr;
     }
 
-    static void SendXpControllerChat(const std::string& message) {
+    static void QueueXpControllerChat(const std::string& message) {
         if (!CanSendXpControllerChat()) {
             Toasts::AddToast("XP Controller", "Lobby chat is unavailable; status message was not sent.", ImVec4(1.f, 0.3f, 0.3f, 1.f));
             return;
         }
 
-        constexpr size_t maxChatLength = 110;
-        if (message.size() <= maxChatLength) {
-            PlayerControl_RpcSendChat(*Game::pLocalPlayer, convert_to_string(message), NULL);
-            xpPostChatDeadline = std::chrono::steady_clock::now() + xpPostChatReadDelay;
-            return;
-        }
-
+        constexpr size_t maxChatLength = 100;
         size_t start = 0;
         while (start < message.size()) {
             size_t end = (std::min)(start + maxChatLength, message.size());
             if (end < message.size()) {
                 const size_t lastSpace = message.rfind(' ', end);
-                if (lastSpace != std::string::npos && lastSpace > start) end = lastSpace;
+                if (lastSpace != std::string::npos && lastSpace > start) {
+                    end = lastSpace;
+                }
             }
-            PlayerControl_RpcSendChat(*Game::pLocalPlayer, convert_to_string(message.substr(start, end - start)), NULL);
-            xpPostChatDeadline = std::chrono::steady_clock::now() + xpPostChatReadDelay;
+            xpPendingChatMessages.push_back(message.substr(start, end - start));
             start = end;
             while (start < message.size() && message[start] == ' ') ++start;
         }
     }
 
     static void BroadcastXpControllerPlayerList(const std::string& label, const std::vector<std::string>& names) {
-        std::string message = label;
+        constexpr size_t maxChatLength = 100;
+        std::string message = "[MATCH CYCLE] " + label;
+        bool hasNames = false;
+        const auto flushMessage = [&]() {
+            QueueXpControllerChat(message);
+        };
+
+        if (names.empty()) {
+            QueueXpControllerChat(message + " None");
+            return;
+        }
         for (const auto& name : names) {
-            const std::string entry = (message == label ? " " : ", ") + name;
-            if (message.size() + entry.size() > 110 && message != label) {
-                SendXpControllerChat(message);
-                message = label + " " + name;
+            const std::string entry = (hasNames ? ", " : " ") + name;
+            if (message.size() + entry.size() > maxChatLength && hasNames) {
+                flushMessage();
+                message = "[MATCH CYCLE] " + label + ":";
+                hasNames = false;
+            }
+            if (entry.size() > maxChatLength - message.size()) {
+                QueueXpControllerChat(name);
             }
             else {
                 message += entry;
+                hasNames = true;
             }
         }
-        SendXpControllerChat(message);
+        if (hasNames || message != "[MATCH CYCLE] " + label) flushMessage();
+    }
+
+    static void TickXpControllerChat() {
+        if (xpPendingChatMessages.empty()) return;
+
+        const auto now = std::chrono::steady_clock::now();
+        if (now < xpNextChatSendAt) return;
+        const std::string message = std::move(xpPendingChatMessages.front());
+        xpPendingChatMessages.pop_front();
+        if (!CanSendXpControllerChat()) {
+            Toasts::AddToast("XP Controller", "Lobby chat unavailable; queued message was dropped.", ImVec4(1.f, 0.3f, 0.3f, 1.f));
+            LogXpControllerEvent(std::format("Dropped queued chat message because chat is unavailable: '{}'.", message));
+        }
+        else {
+            PlayerControl_RpcSendChat(*Game::pLocalPlayer, convert_to_string(message), NULL);
+            LogXpControllerEvent(std::format("Sent chat message ({} chars): '{}'.", message.size(), message));
+            xpPostChatDeadline = now + xpPostChatReadDelay;
+        }
+        xpNextChatSendAt = now + xpChatSendInterval;
     }
 
     static void BroadcastXpControllerSummary() {
@@ -276,13 +314,13 @@ namespace PlayersTab {
         std::vector<std::string> stillNeedFarming;
         for (const auto playerId : participantIds) {
             const auto& tracked = xpTrackedPlayers.at(playerId);
-            if (tracked.was_impostor_this_round && tracked.farmed_this_round) {
+            if (tracked.has_completed_objective) {
                 farmedThisRound.push_back(tracked.name);
             }
             if (!tracked.has_completed_objective) stillNeedFarming.push_back(tracked.name);
         }
-        BroadcastXpControllerPlayerList("Completed farming turn this round:", farmedThisRound);
-        BroadcastXpControllerPlayerList("Still need farming:", stillNeedFarming);
+        BroadcastXpControllerPlayerList("FARMED", farmedThisRound);
+        BroadcastXpControllerPlayerList("UP NEXT", stillNeedFarming);
     }
 
     static void SynchronizeXpPlayers() {
@@ -356,6 +394,10 @@ namespace PlayersTab {
         LogXpControllerEvent(std::format(
             "Completed farming round credited {} assigned Impostor(s) from the immutable round assignment.",
             xpRoundImpostorIds.size()));
+        NotifyXpController(
+            "Farming round complete",
+            std::format("Credited {} assigned Impostor(s).", xpRoundImpostorIds.size()),
+            ImVec4(0.f, 1.f, 0.5f, 1.f));
     }
 
     static void StartNextXpCycle();
@@ -381,6 +423,10 @@ namespace PlayersTab {
         LogXpControllerEvent(std::format(
             "Drain target reached ({}/{} rounds); requesting {} participant(s) to rejoin for up to 30s.",
             xpDrainRoundsCompleted, xpDrainRoundsTarget, names.size()));
+        NotifyXpController(
+            "Rejoin requested",
+            std::format("{} participant(s); waiting up to 30s.", names.size()),
+            ImVec4(1.f, 0.7f, 0.2f, 1.f));
         xpControllerStage = XpControllerStage::AwaitingRejoin;
         xpControllerDeadline = std::chrono::steady_clock::now() + xpRejoinWindow;
     }
@@ -468,15 +514,20 @@ namespace PlayersTab {
             tracked.farmed_this_round = false;
         }
 
+        std::vector<PlayerControl*> nonHostPlayers;
+        for (auto player : players) {
+            if (!IsMatchCycleHost(player)) nonHostPlayers.push_back(player);
+        }
+
         size_t startIndex = 0;
         if (unearnedOnly && xpHasFarmingRotationCursor) {
             const auto nextPlayer = std::lower_bound(
-                players.begin(), players.end(), xpFarmingRotationCursor,
+                nonHostPlayers.begin(), nonHostPlayers.end(), xpFarmingRotationCursor,
                 [](PlayerControl* player, Game::PlayerId playerId) {
                     return player->fields.PlayerId < playerId;
                 });
-            if (nextPlayer != players.end()) {
-                startIndex = static_cast<size_t>(std::distance(players.begin(), nextPlayer));
+            if (nextPlayer != nonHostPlayers.end()) {
+                startIndex = static_cast<size_t>(std::distance(nonHostPlayers.begin(), nextPlayer));
             }
         }
 
@@ -484,11 +535,10 @@ namespace PlayersTab {
         size_t lastSelectedIndex = startIndex;
         const auto selectImpostors = [&](bool skipAttempted) {
             impostors.clear();
-            for (size_t offset = 0; offset < players.size()
+            for (size_t offset = 0; offset < nonHostPlayers.size()
                 && impostors.size() < static_cast<size_t>(teamCap); ++offset) {
-                const size_t index = (startIndex + offset) % players.size();
-                auto player = players[index];
-                if (IsMatchCycleHost(player)) continue;
+                const size_t index = (startIndex + offset) % nonHostPlayers.size();
+                auto player = nonHostPlayers[index];
                 auto it = xpTrackedPlayers.find(player->fields.PlayerId);
                 if (it == xpTrackedPlayers.end()
                     || (unearnedOnly && it->second.has_completed_objective)
@@ -497,7 +547,7 @@ namespace PlayersTab {
                 lastSelectedIndex = index;
             }
         };
-        selectImpostors(true);
+        if (unearnedOnly) selectImpostors(true);
 
         if (unearnedOnly && impostors.empty()) {
             for (auto player : players) {
@@ -528,7 +578,8 @@ namespace PlayersTab {
             impostorIds += std::format("{}", player->fields.PlayerId);
         }
         if (unearnedOnly && !impostors.empty()) {
-            xpFarmingRotationCursor = players[(lastSelectedIndex + 1) % players.size()]->fields.PlayerId;
+            xpFarmingRotationCursor =
+                nonHostPlayers[(lastSelectedIndex + 1) % nonHostPlayers.size()]->fields.PlayerId;
             xpHasFarmingRotationCursor = true;
         }
         for (auto& entry : xpTrackedPlayers) {
@@ -541,6 +592,25 @@ namespace PlayersTab {
             "Configuring teams: phase={}, connectedPlayers={}, connectedNonHost={}, attackerCap={}, attackersSelected={}, attackerIds=[{}], shieldCap={}.",
             XpControllerPhaseName(xpControllerPhase), players.size(), participantCount, teamCap,
             impostors.size(), impostorIds, teamCap));
+        if (unearnedOnly) {
+            std::vector<std::string> selectedNames;
+            for (auto player : impostors) selectedNames.push_back(XpPlayerName(player));
+            std::string nameList = selectedNames.empty() ? "none" : selectedNames.front();
+            for (size_t i = 1; i < selectedNames.size(); ++i) {
+                nameList += ", " + selectedNames[i];
+            }
+            NotifyXpController(
+                "Farming batch selected",
+                std::format("Impostor{}: {} (IDs {}).",
+                    selectedNames.size() == 1 ? "" : "s", nameList, impostorIds),
+                ImVec4(0.2f, 0.8f, 1.f, 1.f));
+        }
+        else {
+            NotifyXpController(
+                "Auto-drain batch",
+                "All players are Crewmates; protection is off.",
+                ImVec4(1.f, 0.7f, 0.2f, 1.f));
+        }
 
         std::vector<PlayerControl*> defenders;
         for (auto player : players) {
@@ -555,25 +625,36 @@ namespace PlayersTab {
             return !IsMatchCycleHost(left) && IsMatchCycleHost(right);
         });
 
-        std::vector<Game::PlayerId> desiredShields;
-        for (auto player : defenders) {
-            if (desiredShields.size() == static_cast<size_t>(teamCap)) break;
-            desiredShields.push_back(player->fields.PlayerId);
-        }
+        if (unearnedOnly) {
+            std::vector<Game::PlayerId> desiredShields;
+            for (auto player : defenders) {
+                if (desiredShields.size() == static_cast<size_t>(teamCap)) break;
+                desiredShields.push_back(player->fields.PlayerId);
+            }
 
-        for (auto& [playerId, tracked] : xpTrackedPlayers) {
-            const bool shouldShield = std::find(desiredShields.begin(), desiredShields.end(), playerId) != desiredShields.end();
-            if (tracked.is_shielded && !shouldShield) {
-                SetShieldState(playerId, false);
-                tracked.is_shielded = false;
+            for (auto& [playerId, tracked] : xpTrackedPlayers) {
+                const bool shouldShield = std::find(desiredShields.begin(), desiredShields.end(), playerId) != desiredShields.end();
+                if (tracked.is_shielded && !shouldShield) {
+                    SetShieldState(playerId, false);
+                    tracked.is_shielded = false;
+                }
+            }
+            for (const auto playerId : desiredShields) {
+                auto& tracked = xpTrackedPlayers[playerId];
+                if (!tracked.is_shielded) {
+                    SetShieldState(playerId, true);
+                    tracked.is_shielded = true;
+                }
             }
         }
-        for (const auto playerId : desiredShields) {
-            auto& tracked = xpTrackedPlayers[playerId];
-            if (!tracked.is_shielded) {
-                SetShieldState(playerId, true);
-                tracked.is_shielded = true;
+        else {
+            for (auto& [playerId, tracked] : xpTrackedPlayers) {
+                if (tracked.is_shielded) {
+                    SetShieldState(playerId, false);
+                    tracked.is_shielded = false;
+                }
             }
+            RestoreMatchCycleProtectionSettings();
         }
 
         SnapshotXpRoundRoles();
@@ -581,7 +662,8 @@ namespace PlayersTab {
     }
 
     static void ReconcileMatchCycleShields() {
-        if (!IsXpControllerRunning() || !IsHost()) return;
+        if (!IsXpControllerRunning() || !IsHost()
+            || xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP) return;
 
         const auto connectedPlayers = GetConnectedXpPlayers();
         const int teamCap = GetMatchCycleTeamCap(GetConnectedNonHostCount());
@@ -745,10 +827,17 @@ namespace PlayersTab {
         xpDrainRoundsCompleted = 0;
         xpDrainRoundsTarget = 0;
         std::sort(participantNames.begin(), participantNames.end());
-        BroadcastXpControllerPlayerList("Drain rounds complete; restarting farming:", participantNames);
+        BroadcastXpControllerPlayerList("NEXT LOOP", participantNames);
+        QueueXpControllerChat(std::format(
+            "[MATCH CYCLE] Break shields fast; match auto-ends after {:.1f} min.",
+            static_cast<float>(xpFarmingDurationSeconds) / 60.f));
         LogXpControllerEvent(std::format(
             "Fixed drain-round sequence completed; starting the next full farming cycle. {}",
             BuildXpControllerDiagnostics()));
+        NotifyXpController(
+            "Farming cycle restarting",
+            std::format("Drain complete. Farming rounds: {}s.", xpFarmingDurationSeconds),
+            ImVec4(0.f, 1.f, 0.5f, 1.f));
         xpControllerPhase = XpControllerPhase::FARMING_ROUND;
         BeginXpFarmingRound();
     }
@@ -784,6 +873,10 @@ namespace PlayersTab {
         LogXpControllerEvent(std::format(
             "Completed drain round {}/{} ({} configured rounds per farming minute).",
             xpDrainRoundsCompleted, xpDrainRoundsTarget, xpDrainRoundsPerMinute));
+        NotifyXpController(
+            "Drain round complete",
+            std::format("Round {}/{}.", xpDrainRoundsCompleted, xpDrainRoundsTarget),
+            ImVec4(1.f, 0.7f, 0.2f, 1.f));
         if (xpDrainRoundsCompleted >= xpDrainRoundsTarget) {
             RequestRejoinForDrainCompletion();
             return;
@@ -844,6 +937,9 @@ namespace PlayersTab {
 
         xpTrackedPlayers.clear();
         xpRoundImpostorIds.clear();
+        xpPendingChatMessages.clear();
+        xpNextChatSendAt = std::chrono::steady_clock::now();
+        xpPostChatDeadline = xpNextChatSendAt;
         xpDrainRoundsCompleted = 0;
         xpDrainRoundsTarget = 0;
         xpHasFarmingRotationCursor = false;
@@ -869,6 +965,9 @@ namespace PlayersTab {
         xpTransitionGraceDeadline = xpLastRosterCheck;
         xpHostAuthorityLostAt = {};
         LogXpControllerEvent(std::format("Match Cycle started. {}", BuildXpControllerDiagnostics()));
+        QueueXpControllerChat(std::format(
+            "[MATCH CYCLE] Break shields fast; match auto-ends after {:.1f} min.",
+            static_cast<float>(xpFarmingDurationSeconds) / 60.f));
         BeginXpFarmingRound();
         Toasts::AddToast("XP Controller", "Starting the farming rounds.", ImVec4(0.f, 1.f, 0.5f, 1.f));
     }
@@ -936,6 +1035,7 @@ namespace PlayersTab {
                 BuildXpControllerDiagnostics()));
             xpHostAuthorityLostAt = {};
         }
+        TickXpControllerChat();
         const bool inLobby = IsInLobby();
         const bool transitioningToLobby = inLobby
             && (xpControllerStage == XpControllerStage::MatchTimer
@@ -1025,10 +1125,17 @@ namespace PlayersTab {
                 xpDrainRoundsCompleted = 0;
                 xpDrainRoundsTarget = GetXpDrainRoundsTarget();
                 xpControllerPhase = XpControllerPhase::ROLLOVER_LOOP;
+                QueueXpControllerChat(std::format(
+                    "[MATCH CYCLE] Drain: {} rounds. 20s to rejoin between rounds or miss next start.",
+                    xpDrainRoundsTarget));
                 LogXpControllerEvent(std::format(
                     "All connected non-host participants completed farming; beginning fixed drain sequence of {} rounds ({} per farming minute, farmingDuration={}s). {}",
                     xpDrainRoundsTarget, xpDrainRoundsPerMinute, xpFarmingDurationSeconds,
                     BuildXpControllerDiagnostics()));
+                NotifyXpController(
+                    "Auto-drain starting",
+                    std::format("{} rounds; protection off.", xpDrainRoundsTarget),
+                    ImVec4(1.f, 0.7f, 0.2f, 1.f));
                 BeginXpRolloverRound();
             }
             else {
