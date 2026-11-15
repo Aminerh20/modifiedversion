@@ -1459,6 +1459,8 @@ namespace PlayersTab {
             StopProtectionLoop();
             return;
         }
+        if (matchCycleProtectionOwnsSettings && IsXpControllerRunning()
+            && (!IsHost() || !IsInGame())) return;
         if (Game::pLocalPlayer == nullptr || *Game::pLocalPlayer == nullptr) return;
 
         auto now = std::chrono::steady_clock::now();
