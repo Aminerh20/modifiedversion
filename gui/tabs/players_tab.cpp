@@ -12,7 +12,6 @@
 #include <unordered_map>
 #include <algorithm>
 #include <chrono>
-#include <deque>
 #include <string>
 #include <utility>
 #include "../../improvements/DrainXp.h"
@@ -82,8 +81,6 @@ namespace PlayersTab {
     static std::chrono::steady_clock::time_point xpParticipantWaitStarted;
     static std::chrono::steady_clock::time_point xpHostAuthorityLostAt;
     static std::chrono::steady_clock::time_point xpPostChatDeadline;
-    static std::chrono::steady_clock::time_point xpNextChatSendAt;
-    static std::deque<std::string> xpPendingChatMessages;
     static size_t g_rpcEmittedThisFrame = 0;
     static constexpr size_t kRpcBudgetPerFrame = 32;
     static std::vector<Game::PlayerId> xpRolesPendingAssignment;
@@ -97,8 +94,7 @@ namespace PlayersTab {
     static bool xpHasFarmingRotationCursor = false;
     static XpControllerStage xpStageBeforeParticipantWait = XpControllerStage::PreparingRound;
     static constexpr auto xpRoundPrepareDelay = std::chrono::seconds(1);
-    static constexpr auto xpPostChatReadDelay = std::chrono::seconds(10);
-    static constexpr auto xpChatSendInterval = std::chrono::seconds(2);
+    static constexpr auto xpPostChatReadDelay = std::chrono::seconds(7);
     static int xpFarmingDurationSeconds = 180;
     static int xpDrainRoundsPerMinute = 7;
     static int xpDrainRoundsCompleted = 0;
@@ -241,7 +237,7 @@ namespace PlayersTab {
             && Game::HudManager.GetInstance()->fields.Chat != nullptr;
     }
 
-    static void QueueXpControllerChat(const std::string& message) {
+    static void SendXpControllerChat(const std::string& message) {
         if (!CanSendXpControllerChat()) {
             Toasts::AddToast("XP Controller", "Lobby chat is unavailable; status message was not sent.", ImVec4(1.f, 0.3f, 0.3f, 1.f));
             return;
@@ -257,76 +253,51 @@ namespace PlayersTab {
                     end = lastSpace;
                 }
             }
-            xpPendingChatMessages.push_back(message.substr(start, end - start));
+            if (g_rpcEmittedThisFrame >= kRpcBudgetPerFrame) {
+                LogXpControllerEvent("Skipped remaining Match Cycle chat chunks because the per-frame RPC budget was exhausted.");
+                return;
+            }
+            const std::string chunk = message.substr(start, end - start);
+            PlayerControl_RpcSendChat(*Game::pLocalPlayer, convert_to_string(chunk), NULL);
+            ++g_rpcEmittedThisFrame;
+            LogXpControllerEvent(std::format("Sent chat message ({} chars): '{}'.", chunk.size(), chunk));
             start = end;
             while (start < message.size() && message[start] == ' ') ++start;
+        }
+        if (xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP) {
+            xpPostChatDeadline = std::chrono::steady_clock::now() + xpPostChatReadDelay;
         }
     }
 
     static void BroadcastXpControllerPlayerList(const std::string& label, const std::vector<std::string>& names) {
         constexpr size_t maxChatLength = 100;
-        std::string message = "[MATCH CYCLE] " + label;
+        const std::string prefix = "[MC] " + label + ":";
+        std::string message = prefix;
         bool hasNames = false;
         const auto flushMessage = [&]() {
-            QueueXpControllerChat(message);
+            SendXpControllerChat(message);
         };
 
         if (names.empty()) {
-            QueueXpControllerChat(message + " None");
+            SendXpControllerChat(message + " none");
             return;
         }
         for (const auto& name : names) {
             const std::string entry = (hasNames ? ", " : " ") + name;
             if (message.size() + entry.size() > maxChatLength && hasNames) {
                 flushMessage();
-                message = "[MATCH CYCLE] " + label + ":";
+                message = prefix;
                 hasNames = false;
             }
             if (entry.size() > maxChatLength - message.size()) {
-                QueueXpControllerChat(name);
+                SendXpControllerChat(prefix + " " + name);
             }
             else {
                 message += entry;
                 hasNames = true;
             }
         }
-        if (hasNames || message != "[MATCH CYCLE] " + label) flushMessage();
-    }
-
-    static size_t xpChatMessagesSent = 0;
-
-    static void TickXpControllerChat() {
-        if (xpPendingChatMessages.empty()) return;
-
-        const auto now = std::chrono::steady_clock::now();
-        if (now < xpNextChatSendAt) return;
-
-        // Match Cycle chat is throttled by the controller's own 2s cadence.
-        // If the frame budget is exhausted we defer the message by one tick
-        // instead of dropping it, because xpPendingChatMessages is the
-        // controller's source of truth for the "chat sent before match start"
-        // barrier (xpPostChatDeadline).
-        if (g_rpcEmittedThisFrame >= kRpcBudgetPerFrame) {
-            xpNextChatSendAt = now + xpChatSendInterval;
-            return;
-        }
-
-        const std::string message = std::move(xpPendingChatMessages.front());
-        xpPendingChatMessages.pop_front();
-        if (!CanSendXpControllerChat()) {
-            Toasts::AddToast("XP Controller", "Lobby chat unavailable; queued message was dropped.", ImVec4(1.f, 0.3f, 0.3f, 1.f));
-            LogXpControllerEvent(std::format("Dropped queued chat message because chat is unavailable: '{}'.", message));
-        }
-        else {
-            PlayerControl_RpcSendChat(*Game::pLocalPlayer, convert_to_string(message), NULL);
-            ++g_rpcEmittedThisFrame;
-            ++xpChatMessagesSent;
-            LogXpControllerEvent(std::format("Sent chat message ({} chars): '{}' (totalSent={}).", message.size(), message, xpChatMessagesSent));
-            if (xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP) {
-                xpPostChatDeadline = now + xpPostChatReadDelay;
-            }
-        }
-        xpNextChatSendAt = now + xpChatSendInterval;
+        if (hasNames || message != prefix) flushMessage();
     }
 
     static void BroadcastXpControllerSummary() {
@@ -347,7 +318,7 @@ namespace PlayersTab {
             if (!tracked.has_completed_objective) stillNeedFarming.push_back(tracked.name);
         }
         BroadcastXpControllerPlayerList("FARMED", farmedThisRound);
-        BroadcastXpControllerPlayerList("UP NEXT", stillNeedFarming);
+        BroadcastXpControllerPlayerList("NEED", stillNeedFarming);
     }
 
     static void SynchronizeXpPlayers() {
@@ -446,7 +417,7 @@ namespace PlayersTab {
             return;
         }
 
-        BroadcastXpControllerPlayerList("Drain rounds complete; please rejoin:", names);
+        BroadcastXpControllerPlayerList("REJOIN", names);
         LogXpControllerEvent(std::format(
             "Drain target reached ({}/{} rounds); requesting {} participant(s) to rejoin for up to 30s.",
             xpDrainRoundsCompleted, xpDrainRoundsTarget, names.size()));
@@ -799,7 +770,6 @@ namespace PlayersTab {
             return;
         }
         const auto now = std::chrono::steady_clock::now();
-        if (!xpPendingChatMessages.empty()) return;
         if (xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP && now < xpPostChatDeadline) return;
 
         if (g_rpcEmittedThisFrame >= kRpcBudgetPerFrame) return;
@@ -1023,9 +993,7 @@ namespace PlayersTab {
 
         xpTrackedPlayers.clear();
         xpRoundImpostorIds.clear();
-        xpPendingChatMessages.clear();
-        xpNextChatSendAt = std::chrono::steady_clock::now();
-        xpPostChatDeadline = xpNextChatSendAt;
+        xpPostChatDeadline = std::chrono::steady_clock::now();
         xpDrainRoundsCompleted = 0;
         xpDrainRoundsTarget = 0;
         xpHasFarmingRotationCursor = false;
@@ -1120,7 +1088,6 @@ namespace PlayersTab {
                 BuildXpControllerDiagnostics()));
             xpHostAuthorityLostAt = {};
         }
-        TickXpControllerChat();
         const bool inLobby = IsInLobby();
         const bool transitioningToLobby = inLobby
             && (xpControllerStage == XpControllerStage::MatchTimer
@@ -1209,8 +1176,8 @@ namespace PlayersTab {
                 xpDrainRoundsCompleted = 0;
                 xpDrainRoundsTarget = GetXpDrainRoundsTarget();
                 xpControllerPhase = XpControllerPhase::ROLLOVER_LOOP;
-                QueueXpControllerChat(std::format(
-                    "[MATCH CYCLE] Farming done: {} drain rounds; 20s to rejoin between rounds.",
+                SendXpControllerChat(std::format(
+                    "[MC] DRAIN: {} rounds; 20s rejoin.",
                     xpDrainRoundsTarget));
                 LogXpControllerEvent(std::format(
                     "All connected non-host participants completed farming; beginning fixed drain sequence of {} rounds ({} per farming minute, farmingDuration={}s). {}",
