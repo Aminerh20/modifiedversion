@@ -81,7 +81,6 @@ namespace PlayersTab {
     static std::chrono::steady_clock::time_point xpTransitionGraceDeadline;
     static std::chrono::steady_clock::time_point xpParticipantWaitStarted;
     static std::chrono::steady_clock::time_point xpHostAuthorityLostAt;
-    static std::chrono::steady_clock::time_point xpProtectionResumeAt;
     static std::chrono::steady_clock::time_point xpPostChatDeadline;
     static std::chrono::steady_clock::time_point xpNextChatSendAt;
     static std::deque<std::string> xpPendingChatMessages;
@@ -99,7 +98,6 @@ namespace PlayersTab {
     static XpControllerStage xpStageBeforeParticipantWait = XpControllerStage::PreparingRound;
     static constexpr auto xpRoundPrepareDelay = std::chrono::seconds(1);
     static constexpr auto xpPostChatReadDelay = std::chrono::seconds(10);
-    static constexpr auto xpProtectionStartDelay = std::chrono::seconds(10);
     static constexpr auto xpChatSendInterval = std::chrono::seconds(2);
     static int xpFarmingDurationSeconds = 180;
     static int xpDrainRoundsPerMinute = 7;
@@ -324,7 +322,9 @@ namespace PlayersTab {
             ++g_rpcEmittedThisFrame;
             ++xpChatMessagesSent;
             LogXpControllerEvent(std::format("Sent chat message ({} chars): '{}' (totalSent={}).", message.size(), message, xpChatMessagesSent));
-            xpPostChatDeadline = now + xpPostChatReadDelay;
+            if (xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP) {
+                xpPostChatDeadline = now + xpPostChatReadDelay;
+            }
         }
         xpNextChatSendAt = now + xpChatSendInterval;
     }
@@ -800,7 +800,7 @@ namespace PlayersTab {
         }
         const auto now = std::chrono::steady_clock::now();
         if (!xpPendingChatMessages.empty()) return;
-        if (now < xpPostChatDeadline) return;
+        if (xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP && now < xpPostChatDeadline) return;
 
         if (g_rpcEmittedThisFrame >= kRpcBudgetPerFrame) return;
 
@@ -917,9 +917,6 @@ namespace PlayersTab {
         xpRoundImpostorIds.clear();
         xpDrainRoundsCompleted = 0;
         xpDrainRoundsTarget = 0;
-        QueueXpControllerChat(std::format(
-            "[MATCH CYCLE] Farming resumes: break shields fast; ends in {:.1f} min.",
-            static_cast<float>(xpFarmingDurationSeconds) / 60.f));
         LogXpControllerEvent(std::format(
             "Fixed drain-round sequence completed; starting the next full farming cycle. {}",
             BuildXpControllerDiagnostics()));
@@ -1032,7 +1029,6 @@ namespace PlayersTab {
         xpDrainRoundsCompleted = 0;
         xpDrainRoundsTarget = 0;
         xpHasFarmingRotationCursor = false;
-        xpProtectionResumeAt = {};
         State.ForceEndAfterStartTriggered = false;
         for (auto player : GetConnectedXpPlayers()) {
             auto& tracked = xpTrackedPlayers[player->fields.PlayerId];
@@ -1055,9 +1051,6 @@ namespace PlayersTab {
         xpTransitionGraceDeadline = xpLastRosterCheck;
         xpHostAuthorityLostAt = {};
         LogXpControllerEvent(std::format("Match Cycle started. {}", BuildXpControllerDiagnostics()));
-        QueueXpControllerChat(std::format(
-            "[MATCH CYCLE] Start farming: break shields fast; ends in {:.1f} min.",
-            static_cast<float>(xpFarmingDurationSeconds) / 60.f));
         BeginXpFarmingRound();
         Toasts::AddToast("XP Controller", "Starting the farming rounds.", ImVec4(0.f, 1.f, 0.5f, 1.f));
     }
@@ -1164,12 +1157,6 @@ namespace PlayersTab {
         case XpControllerStage::AwaitingMatch:
             if (IsInGame()) {
                 xpControllerStage = XpControllerStage::MatchTimer;
-                if (matchCycleProtectionOwnsSettings) {
-                    xpProtectionResumeAt = now + xpProtectionStartDelay;
-                    LogXpControllerEvent(std::format(
-                        "Match started; Match Cycle protection will resume in {}s.",
-                        xpProtectionStartDelay.count()));
-                }
                 const int matchDurationSeconds = xpControllerPhase == XpControllerPhase::FARMING_ROUND
                     ? xpFarmingDurationSeconds : static_cast<int>(xpRolloverDuration.count());
                 xpControllerDeadline = now + std::chrono::seconds(matchDurationSeconds);
@@ -1470,9 +1457,6 @@ namespace PlayersTab {
         }
         if (matchCycleProtectionOwnsSettings && IsXpControllerRunning()
             && (!IsHost() || !IsInGame())) return;
-        if (matchCycleProtectionOwnsSettings && IsXpControllerRunning()
-            && xpProtectionResumeAt != std::chrono::steady_clock::time_point{}
-            && std::chrono::steady_clock::now() < xpProtectionResumeAt) return;
         if (Game::pLocalPlayer == nullptr || *Game::pLocalPlayer == nullptr) return;
 
         auto now = std::chrono::steady_clock::now();
