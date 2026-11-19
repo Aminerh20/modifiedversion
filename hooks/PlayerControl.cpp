@@ -946,6 +946,9 @@ void dPlayerControl_OnGameStart(PlayerControl* __this, MethodInfo* method) {
     try {
         const bool firstGameLoad = !State.GameLoaded;
         State.GameLoaded = true;
+        if (Game::pLocalPlayer != nullptr && __this == *Game::pLocalPlayer) {
+            PlayersTab::OnXpControllerGameStarted();
+        }
 
         if (firstGameLoad && State.EndGameV2 && IsHost() && IsInGame()
             && !PlayersTab::IsXpControllerRunning()) {

@@ -1388,17 +1388,7 @@ namespace PlayersTab {
             if (IsInLobby() && now >= xpControllerDeadline) StartPreparedXpMatch();
             break;
         case XpControllerStage::AwaitingMatch:
-            if (IsInGame()) {
-                xpControllerStage = XpControllerStage::MatchTimer;
-                const int matchDurationSeconds = xpControllerPhase == XpControllerPhase::FARMING_ROUND
-                    ? xpFarmingDurationSeconds : static_cast<int>(xpRolloverDuration.count());
-                xpControllerDeadline = now + std::chrono::seconds(matchDurationSeconds);
-                LogXpControllerEvent(std::format(
-                    "Match scene detected; starting {}s timer. {}",
-                    matchDurationSeconds,
-                    BuildXpControllerDiagnostics()));
-            }
-            else if (now >= xpControllerDeadline) {
+            if (now >= xpControllerDeadline) {
                 StopXpController("The match did not start before the timeout.");
             }
             break;
@@ -1465,6 +1455,20 @@ namespace PlayersTab {
             }
             break;
         }
+    }
+
+    void OnXpControllerGameStarted() {
+        if (!IsXpControllerRunning() || !IsHost()
+            || xpControllerStage != XpControllerStage::AwaitingMatch) return;
+
+        const int matchDurationSeconds = xpControllerPhase == XpControllerPhase::FARMING_ROUND
+            ? xpFarmingDurationSeconds : static_cast<int>(xpRolloverDuration.count());
+        xpControllerStage = XpControllerStage::MatchTimer;
+        xpControllerDeadline = std::chrono::steady_clock::now()
+            + std::chrono::seconds(matchDurationSeconds);
+        LogXpControllerEvent(std::format(
+            "Game loading completed; starting {}s round timer. {}",
+            matchDurationSeconds, BuildXpControllerDiagnostics()));
     }
 
     enum Groups {

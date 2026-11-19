@@ -50,6 +50,7 @@ namespace PlayersTab {
 	int GetXpFinalRejoinWindowSeconds();
 	void SetXpFinalRejoinWindowSeconds(int seconds);
 	void TickXpController();
+	void OnXpControllerGameStarted();
 	std::string GetXpControllerStatus();
 	void TickKillLoop();
 	void StopKillLoop();
