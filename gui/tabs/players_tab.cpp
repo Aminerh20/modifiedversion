@@ -294,7 +294,7 @@ namespace PlayersTab {
 
     static void BroadcastXpControllerPlayerList(const std::string& label, const std::vector<std::string>& names) {
         constexpr size_t maxChatLength = 100;
-        const std::string prefix = "[MC] " + label + ":";
+        const std::string prefix = "MC " + label + ":";
         std::string message = prefix;
         bool hasNames = false;
         const auto flushMessage = [&]() {
@@ -943,7 +943,7 @@ namespace PlayersTab {
             ImVec4(0.f, 1.f, 0.5f, 1.f));
         xpControllerPhase = XpControllerPhase::FARMING_ROUND;
         QueueXpControllerChat(
-            std::format("[MC] Farming: break shields fast; auto-ends in {}s.", xpFarmingDurationSeconds),
+            std::format("MC Farming: break shields fast; auto-ends in {}s.", xpFarmingDurationSeconds),
             xpFarmingAnnouncementDelay);
         BeginXpFarmingRound();
     }
@@ -1077,7 +1077,7 @@ namespace PlayersTab {
         xpHostAuthorityLostAt = {};
         LogXpControllerEvent(std::format("Match Cycle started. {}", BuildXpControllerDiagnostics()));
         QueueXpControllerChat(
-            std::format("[MC] Farming: break shields fast; auto-ends in {}s.", xpFarmingDurationSeconds),
+            std::format("MC Farming: break shields fast; auto-ends in {}s.", xpFarmingDurationSeconds),
             xpFarmingAnnouncementDelay);
         BeginXpFarmingRound();
         Toasts::AddToast("XP Controller", "Starting the farming rounds.", ImVec4(0.f, 1.f, 0.5f, 1.f));
@@ -1238,7 +1238,7 @@ namespace PlayersTab {
                 xpDrainRoundsTarget = GetXpDrainRoundsTarget();
                 xpControllerPhase = XpControllerPhase::ROLLOVER_LOOP;
                 QueueXpControllerChat(std::format(
-                    "[MC] Drain starts in 30s: {} rounds; {}s rejoin between. Miss it, game starts.",
+                    "MC Drain starts in 30s: {} rounds; {}s rejoin between. Miss it, game starts.",
                     xpDrainRoundsTarget, xpDrainBetweenRoundRejoinSeconds),
                     xpDrainAnnouncementDelay);
                 LogXpControllerEvent(std::format(
