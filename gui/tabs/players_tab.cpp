@@ -12,6 +12,7 @@
 #include <unordered_map>
 #include <algorithm>
 #include <chrono>
+#include <deque>
 #include <string>
 #include <utility>
 #include "../../improvements/DrainXp.h"
@@ -71,6 +72,11 @@ namespace PlayersTab {
         std::string name;
     };
 
+    struct XpControllerChatMessage {
+        std::string text;
+        std::chrono::seconds delayAfterSend{0};
+    };
+
     static XpControllerPhase xpControllerPhase = XpControllerPhase::STOPPED;
     static XpControllerStage xpControllerStage = XpControllerStage::PreparingRound;
     static std::unordered_map<Game::PlayerId, XpTrackedPlayer> xpTrackedPlayers;
@@ -81,6 +87,8 @@ namespace PlayersTab {
     static std::chrono::steady_clock::time_point xpParticipantWaitStarted;
     static std::chrono::steady_clock::time_point xpHostAuthorityLostAt;
     static std::chrono::steady_clock::time_point xpPostChatDeadline;
+    static std::chrono::steady_clock::time_point xpNextChatSendAt;
+    static std::deque<XpControllerChatMessage> xpPendingChatMessages;
     static size_t g_rpcEmittedThisFrame = 0;
     static constexpr size_t kRpcBudgetPerFrame = 32;
     static std::vector<Game::PlayerId> xpRolesPendingAssignment;
@@ -94,14 +102,16 @@ namespace PlayersTab {
     static bool xpHasFarmingRotationCursor = false;
     static XpControllerStage xpStageBeforeParticipantWait = XpControllerStage::PreparingRound;
     static constexpr auto xpRoundPrepareDelay = std::chrono::seconds(1);
-    static constexpr auto xpPostChatReadDelay = std::chrono::seconds(7);
+    static constexpr auto xpFarmingAnnouncementDelay = std::chrono::seconds(10);
+    static constexpr auto xpDrainAnnouncementDelay = std::chrono::seconds(30);
+    static constexpr auto xpChatSendInterval = std::chrono::seconds(3);
     static int xpFarmingDurationSeconds = 180;
     static int xpDrainRoundsPerMinute = 7;
+    static int xpDrainBetweenRoundRejoinSeconds = 20;
+    static int xpFinalRejoinWindowSeconds = 60;
     static int xpDrainRoundsCompleted = 0;
     static int xpDrainRoundsTarget = 0;
     static constexpr auto xpRolloverDuration = std::chrono::seconds(35);
-    static constexpr auto xpRejoinWindow = std::chrono::seconds(30);
-    static constexpr auto xpLobbyDelay = std::chrono::seconds(20);
     static constexpr auto transitionGraceDuration = std::chrono::seconds(10);
     static constexpr auto xpHostAuthorityGraceDuration = std::chrono::seconds(10);
     static constexpr auto xpStageTimeout = std::chrono::seconds(60);
@@ -237,7 +247,9 @@ namespace PlayersTab {
             && Game::HudManager.GetInstance()->fields.Chat != nullptr;
     }
 
-    static void SendXpControllerChat(const std::string& message) {
+    static void QueueXpControllerChat(
+        const std::string& message,
+        std::chrono::seconds delayAfterSend = std::chrono::seconds::zero()) {
         if (!CanSendXpControllerChat()) {
             Toasts::AddToast("XP Controller", "Lobby chat is unavailable; status message was not sent.", ImVec4(1.f, 0.3f, 0.3f, 1.f));
             return;
@@ -253,20 +265,31 @@ namespace PlayersTab {
                     end = lastSpace;
                 }
             }
-            if (g_rpcEmittedThisFrame >= kRpcBudgetPerFrame) {
-                LogXpControllerEvent("Skipped remaining Match Cycle chat chunks because the per-frame RPC budget was exhausted.");
-                return;
-            }
-            const std::string chunk = message.substr(start, end - start);
-            PlayerControl_RpcSendChat(*Game::pLocalPlayer, convert_to_string(chunk), NULL);
-            ++g_rpcEmittedThisFrame;
-            LogXpControllerEvent(std::format("Sent chat message ({} chars): '{}'.", chunk.size(), chunk));
+            xpPendingChatMessages.push_back({
+                message.substr(start, end - start),
+                delayAfterSend,
+            });
             start = end;
             while (start < message.size() && message[start] == ' ') ++start;
         }
-        if (xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP) {
-            xpPostChatDeadline = std::chrono::steady_clock::now() + xpPostChatReadDelay;
-        }
+    }
+
+    static void TickXpControllerChat() {
+        if (xpPendingChatMessages.empty() || !IsInLobby()) return;
+
+        const auto now = std::chrono::steady_clock::now();
+        if (now < xpNextChatSendAt || State.ChatCooldown < 3.f) return;
+        if (!CanSendXpControllerChat()) return;
+
+        auto queuedMessage = std::move(xpPendingChatMessages.front());
+        xpPendingChatMessages.pop_front();
+        State.lobbyRpcQueue.push(new RpcSendChat(*Game::pLocalPlayer, queuedMessage.text));
+        State.MessageSent = true;
+        LogXpControllerEvent(std::format(
+            "Queued chat through Sicko RpcSendChat ({} chars): '{}'.",
+            queuedMessage.text.size(), queuedMessage.text));
+        xpNextChatSendAt = now + xpChatSendInterval;
+        xpPostChatDeadline = now + queuedMessage.delayAfterSend;
     }
 
     static void BroadcastXpControllerPlayerList(const std::string& label, const std::vector<std::string>& names) {
@@ -275,11 +298,11 @@ namespace PlayersTab {
         std::string message = prefix;
         bool hasNames = false;
         const auto flushMessage = [&]() {
-            SendXpControllerChat(message);
+            QueueXpControllerChat(message);
         };
 
         if (names.empty()) {
-            SendXpControllerChat(message + " none");
+            QueueXpControllerChat(message + " none");
             return;
         }
         for (const auto& name : names) {
@@ -290,7 +313,7 @@ namespace PlayersTab {
                 hasNames = false;
             }
             if (entry.size() > maxChatLength - message.size()) {
-                SendXpControllerChat(prefix + " " + name);
+                QueueXpControllerChat(prefix + " " + name);
             }
             else {
                 message += entry;
@@ -417,16 +440,18 @@ namespace PlayersTab {
             return;
         }
 
-        BroadcastXpControllerPlayerList("REJOIN", names);
+        BroadcastXpControllerPlayerList(
+            std::format("REJOIN NOW - WAIT {}s", xpFinalRejoinWindowSeconds), names);
         LogXpControllerEvent(std::format(
-            "Drain target reached ({}/{} rounds); requesting {} participant(s) to rejoin for up to 30s.",
-            xpDrainRoundsCompleted, xpDrainRoundsTarget, names.size()));
+            "Drain target reached ({}/{} rounds); requesting {} participant(s) to rejoin for up to {}s.",
+            xpDrainRoundsCompleted, xpDrainRoundsTarget, names.size(), xpFinalRejoinWindowSeconds));
         NotifyXpController(
             "Rejoin requested",
-            std::format("{} participant(s); waiting up to 30s.", names.size()),
+            std::format("{} participant(s); waiting up to {}s.", names.size(), xpFinalRejoinWindowSeconds),
             ImVec4(1.f, 0.7f, 0.2f, 1.f));
         xpControllerStage = XpControllerStage::AwaitingRejoin;
-        xpControllerDeadline = std::chrono::steady_clock::now() + xpRejoinWindow;
+        xpControllerDeadline = std::chrono::steady_clock::now()
+            + std::chrono::seconds(xpFinalRejoinWindowSeconds);
     }
 
     static bool AllRequestedPlayersRejoined() {
@@ -484,6 +509,7 @@ namespace PlayersTab {
         xpRoleAssignmentComplete = false;
         xpDrainRoundsCompleted = 0;
         xpDrainRoundsTarget = 0;
+        xpPendingChatMessages.clear();
         for (auto& [playerId, tracked] : xpTrackedPlayers) {
             if (tracked.is_shielded) SetShieldState(playerId, false);
         }
@@ -770,7 +796,7 @@ namespace PlayersTab {
             return;
         }
         const auto now = std::chrono::steady_clock::now();
-        if (xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP && now < xpPostChatDeadline) return;
+        if (!xpPendingChatMessages.empty() || now < xpPostChatDeadline) return;
 
         if (g_rpcEmittedThisFrame >= kRpcBudgetPerFrame) return;
 
@@ -867,11 +893,32 @@ namespace PlayersTab {
     }
 
     static void HandleXpRoundReturnedToLobby() {
-        LogXpControllerEvent(std::format(
-            "Lobby detected after match; starting 20s lobby delay. {}",
-            BuildXpControllerDiagnostics()));
+        if (xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP) {
+            ++xpDrainRoundsCompleted;
+            LogXpControllerEvent(std::format(
+                "Completed drain round {}/{} ({} configured rounds per farming minute).",
+                xpDrainRoundsCompleted, xpDrainRoundsTarget, xpDrainRoundsPerMinute));
+            NotifyXpController(
+                "Drain round complete",
+                std::format("Round {}/{}.", xpDrainRoundsCompleted, xpDrainRoundsTarget),
+                ImVec4(1.f, 0.7f, 0.2f, 1.f));
+            if (xpDrainRoundsCompleted >= xpDrainRoundsTarget) {
+                RequestRejoinForDrainCompletion();
+                return;
+            }
+            LogXpControllerEvent(std::format(
+                "Waiting {}s before drain round {}/{}.",
+                xpDrainBetweenRoundRejoinSeconds,
+                xpDrainRoundsCompleted + 1,
+                xpDrainRoundsTarget));
+        }
+        else {
+            LogXpControllerEvent("Lobby detected after farming match; starting 20s lobby delay.");
+        }
         xpControllerStage = XpControllerStage::LobbyDelay;
-        xpControllerDeadline = std::chrono::steady_clock::now() + xpLobbyDelay;
+        xpControllerDeadline = std::chrono::steady_clock::now()
+            + std::chrono::seconds(xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP
+                ? xpDrainBetweenRoundRejoinSeconds : 20);
     }
 
     static void StartNextXpCycle() {
@@ -895,13 +942,18 @@ namespace PlayersTab {
             std::format("Drain complete. Farming rounds: {}s.", xpFarmingDurationSeconds),
             ImVec4(0.f, 1.f, 0.5f, 1.f));
         xpControllerPhase = XpControllerPhase::FARMING_ROUND;
+        QueueXpControllerChat(
+            std::format("[MC] Farming: break shields fast; auto-ends in {}s.", xpFarmingDurationSeconds),
+            xpFarmingAnnouncementDelay);
         BeginXpFarmingRound();
     }
 
     static void ProcessXpLobbyDelay() {
         if (GetConnectedNonHostCount() == 0) {
             LogXpControllerEvent(std::format(
-                "20s lobby delay expired with zero non-host players; pausing before XP evaluation. inLobby={}, stage={}.",
+                "{}s lobby delay expired with zero non-host players; pausing before XP evaluation. inLobby={}, stage={}.",
+                xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP
+                    ? xpDrainBetweenRoundRejoinSeconds : 20,
                 IsInLobby(), XpControllerStageName(xpControllerStage)));
             PauseForNonHostParticipants(std::chrono::steady_clock::now());
             return;
@@ -925,19 +977,6 @@ namespace PlayersTab {
             return;
         }
 
-        ++xpDrainRoundsCompleted;
-        LogXpControllerEvent(std::format(
-            "Completed drain round {}/{} ({} configured rounds per farming minute).",
-            xpDrainRoundsCompleted, xpDrainRoundsTarget, xpDrainRoundsPerMinute));
-        NotifyXpController(
-            "Drain round complete",
-            std::format("Round {}/{}.", xpDrainRoundsCompleted, xpDrainRoundsTarget),
-            ImVec4(1.f, 0.7f, 0.2f, 1.f));
-        if (xpDrainRoundsCompleted >= xpDrainRoundsTarget) {
-            RequestRejoinForDrainCompletion();
-            return;
-        }
-
         LogXpControllerEvent(std::format(
             "Drain round target not reached; starting round {}/{}.",
             xpDrainRoundsCompleted + 1, xpDrainRoundsTarget));
@@ -958,6 +997,22 @@ namespace PlayersTab {
 
     void SetXpDrainRoundsPerMinute(int rounds) {
         xpDrainRoundsPerMinute = (std::clamp)(rounds, 1, 60);
+    }
+
+    int GetXpDrainBetweenRoundRejoinSeconds() {
+        return xpDrainBetweenRoundRejoinSeconds;
+    }
+
+    void SetXpDrainBetweenRoundRejoinSeconds(int seconds) {
+        xpDrainBetweenRoundRejoinSeconds = (std::clamp)(seconds, 1, 3600);
+    }
+
+    int GetXpFinalRejoinWindowSeconds() {
+        return xpFinalRejoinWindowSeconds;
+    }
+
+    void SetXpFinalRejoinWindowSeconds(int seconds) {
+        xpFinalRejoinWindowSeconds = (std::clamp)(seconds, 1, 3600);
     }
 
     void StartXpController() {
@@ -993,6 +1048,8 @@ namespace PlayersTab {
 
         xpTrackedPlayers.clear();
         xpRoundImpostorIds.clear();
+        xpPendingChatMessages.clear();
+        xpNextChatSendAt = std::chrono::steady_clock::now();
         xpPostChatDeadline = std::chrono::steady_clock::now();
         xpDrainRoundsCompleted = 0;
         xpDrainRoundsTarget = 0;
@@ -1019,6 +1076,9 @@ namespace PlayersTab {
         xpTransitionGraceDeadline = xpLastRosterCheck;
         xpHostAuthorityLostAt = {};
         LogXpControllerEvent(std::format("Match Cycle started. {}", BuildXpControllerDiagnostics()));
+        QueueXpControllerChat(
+            std::format("[MC] Farming: break shields fast; auto-ends in {}s.", xpFarmingDurationSeconds),
+            xpFarmingAnnouncementDelay);
         BeginXpFarmingRound();
         Toasts::AddToast("XP Controller", "Starting the farming rounds.", ImVec4(0.f, 1.f, 0.5f, 1.f));
     }
@@ -1088,6 +1148,7 @@ namespace PlayersTab {
                 BuildXpControllerDiagnostics()));
             xpHostAuthorityLostAt = {};
         }
+        TickXpControllerChat();
         const bool inLobby = IsInLobby();
         const bool transitioningToLobby = inLobby
             && (xpControllerStage == XpControllerStage::MatchTimer
@@ -1176,9 +1237,10 @@ namespace PlayersTab {
                 xpDrainRoundsCompleted = 0;
                 xpDrainRoundsTarget = GetXpDrainRoundsTarget();
                 xpControllerPhase = XpControllerPhase::ROLLOVER_LOOP;
-                SendXpControllerChat(std::format(
-                    "[MC] DRAIN: {} rounds; 20s rejoin.",
-                    xpDrainRoundsTarget));
+                QueueXpControllerChat(std::format(
+                    "[MC] Drain starts in 30s: {} rounds; {}s rejoin between. Miss it, game starts.",
+                    xpDrainRoundsTarget, xpDrainBetweenRoundRejoinSeconds),
+                    xpDrainAnnouncementDelay);
                 LogXpControllerEvent(std::format(
                     "All connected non-host participants completed farming; beginning fixed drain sequence of {} rounds ({} per farming minute, farmingDuration={}s). {}",
                     xpDrainRoundsTarget, xpDrainRoundsPerMinute, xpFarmingDurationSeconds,

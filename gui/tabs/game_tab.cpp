@@ -231,7 +231,24 @@ namespace GameTab {
                 }
                 const int drainRoundTarget =
                     (PlayersTab::GetXpFarmingDurationSeconds() * PlayersTab::GetXpDrainRoundsPerMinute() + 59) / 60;
-                ImGui::TextDisabled("Auto-drain runs this many 35-second rounds with no Match Cycle protection, then a 30-second rejoin window.");
+
+                int drainBetweenRoundRejoinSeconds = PlayersTab::GetXpDrainBetweenRoundRejoinSeconds();
+                ImGui::SetNextItemWidth(180 * State.dpiScale);
+                if (ImGui::InputInt("Rejoin wait between drain rounds (seconds)", &drainBetweenRoundRejoinSeconds)) {
+                    PlayersTab::SetXpDrainBetweenRoundRejoinSeconds(drainBetweenRoundRejoinSeconds);
+                }
+
+                int finalRejoinWindowSeconds = PlayersTab::GetXpFinalRejoinWindowSeconds();
+                ImGui::SetNextItemWidth(180 * State.dpiScale);
+                if (ImGui::InputInt("Rejoin wait after drain (seconds)", &finalRejoinWindowSeconds)) {
+                    PlayersTab::SetXpFinalRejoinWindowSeconds(finalRejoinWindowSeconds);
+                }
+                ImGui::TextDisabled(
+                    "Drain starts 30s after its notice, runs %d 35s rounds without protection, and waits %ds between rounds.",
+                    drainRoundTarget, PlayersTab::GetXpDrainBetweenRoundRejoinSeconds());
+                ImGui::TextDisabled(
+                    "After the final drain round, the cycle asks players to rejoin and waits up to %ds before farming restarts.",
+                    PlayersTab::GetXpFinalRejoinWindowSeconds());
 
                 if (!PlayersTab::IsXpControllerRunning()) {
                     if (AnimatedButton("Start Match Cycle")) {
@@ -246,7 +263,7 @@ namespace GameTab {
                     ImGui::TextWrapped("%s", status.c_str());
                 }
                 ImGui::TextDisabled("Host is excluded. Each assigned Impostor counts after their round returns to the lobby; drain uses a fixed round count, not level checks.");
-                ImGui::TextDisabled("Cycle notices are sent in chat; matches wait 10 seconds after the last notice before starting.");
+                ImGui::TextDisabled("Farming starts 10s after its notice; auto-drain starts 30s after its notice.");
                 ImGui::TextDisabled("Next auto-drain target: %d rounds.", drainRoundTarget);
                 ImGui::TextDisabled("Disable Auto Fake Role, Battle Royale, Task Speedrun, End Game V2, No Game End, and non-standard game modes first.");
                 ImGui::TextDisabled("Auto-start, timed end, task/level auto-kicks pause during the cycle. Match Cycle controls role assignment.");
