@@ -98,6 +98,7 @@ namespace PlayersTab {
     static bool xpRoleHostAssigned = false;
     static bool xpRoleAssignmentStarted = false;
     static bool xpRoleAssignmentComplete = false;
+    static bool xpFarmingCycleAnnouncementPending = false;
     static Game::PlayerId xpFarmingRotationCursor = 0;
     static bool xpHasFarmingRotationCursor = false;
     static XpControllerStage xpStageBeforeParticipantWait = XpControllerStage::PreparingRound;
@@ -247,6 +248,20 @@ namespace PlayersTab {
             && Game::HudManager.GetInstance()->fields.Chat != nullptr;
     }
 
+    static std::string SanitizeXpControllerChatText(const std::string& message) {
+        std::string sanitized = message;
+        sanitized.erase(std::remove_if(sanitized.begin(), sanitized.end(), [](char character) {
+            return character == '[' || character == ']' || character == '{'
+                || character == '}' || character == '<' || character == '>';
+        }), sanitized.end());
+        return sanitized;
+    }
+
+    static std::string XpControllerChatName(const std::string& name) {
+        std::string sanitized = SanitizeXpControllerChatText(name);
+        return sanitized.empty() ? "Player" : sanitized;
+    }
+
     static void QueueXpControllerChat(
         const std::string& message,
         std::chrono::seconds delayAfterSend = std::chrono::seconds::zero()) {
@@ -255,22 +270,25 @@ namespace PlayersTab {
             return;
         }
 
+        const std::string chatMessage = SanitizeXpControllerChatText(message);
+        if (chatMessage.empty()) return;
+
         constexpr size_t maxChatLength = 100;
         size_t start = 0;
-        while (start < message.size()) {
-            size_t end = (std::min)(start + maxChatLength, message.size());
-            if (end < message.size()) {
-                const size_t lastSpace = message.rfind(' ', end);
+        while (start < chatMessage.size()) {
+            size_t end = (std::min)(start + maxChatLength, chatMessage.size());
+            if (end < chatMessage.size()) {
+                const size_t lastSpace = chatMessage.rfind(' ', end);
                 if (lastSpace != std::string::npos && lastSpace > start) {
                     end = lastSpace;
                 }
             }
             xpPendingChatMessages.push_back({
-                message.substr(start, end - start),
-                delayAfterSend,
+                chatMessage.substr(start, end - start),
+                end == chatMessage.size() ? delayAfterSend : std::chrono::seconds::zero(),
             });
             start = end;
-            while (start < message.size() && message[start] == ' ') ++start;
+            while (start < chatMessage.size() && chatMessage[start] == ' ') ++start;
         }
     }
 
@@ -292,20 +310,34 @@ namespace PlayersTab {
         xpPostChatDeadline = now + queuedMessage.delayAfterSend;
     }
 
-    static void BroadcastXpControllerPlayerList(const std::string& label, const std::vector<std::string>& names) {
+    static void BroadcastXpControllerPlayerList(
+        const std::string& label,
+        const std::vector<std::string>& names,
+        std::chrono::seconds delayAfterSend = std::chrono::seconds::zero()) {
         constexpr size_t maxChatLength = 100;
         const std::string prefix = "MC " + label + ":";
+        std::vector<std::string> chatNames;
+        chatNames.reserve(names.size());
+        for (const auto& name : names) chatNames.push_back(XpControllerChatName(name));
         std::string message = prefix;
         bool hasNames = false;
+        const size_t firstPendingMessage = xpPendingChatMessages.size();
         const auto flushMessage = [&]() {
             QueueXpControllerChat(message);
         };
+        const auto delayAfterLastMessage = [&]() {
+            if (delayAfterSend > std::chrono::seconds::zero()
+                && xpPendingChatMessages.size() > firstPendingMessage) {
+                xpPendingChatMessages.back().delayAfterSend = delayAfterSend;
+            }
+        };
 
-        if (names.empty()) {
+        if (chatNames.empty()) {
             QueueXpControllerChat(message + " none");
+            delayAfterLastMessage();
             return;
         }
-        for (const auto& name : names) {
+        for (const auto& name : chatNames) {
             const std::string entry = (hasNames ? ", " : " ") + name;
             if (message.size() + entry.size() > maxChatLength && hasNames) {
                 flushMessage();
@@ -321,6 +353,7 @@ namespace PlayersTab {
             }
         }
         if (hasNames || message != prefix) flushMessage();
+        delayAfterLastMessage();
     }
 
     static void BroadcastXpControllerSummary() {
@@ -341,7 +374,7 @@ namespace PlayersTab {
             if (!tracked.has_completed_objective) stillNeedFarming.push_back(tracked.name);
         }
         BroadcastXpControllerPlayerList("FARMED", farmedThisRound);
-        BroadcastXpControllerPlayerList("NEED", stillNeedFarming);
+        BroadcastXpControllerPlayerList("NEED", stillNeedFarming, xpFarmingAnnouncementDelay);
     }
 
     static void SynchronizeXpPlayers() {
@@ -424,30 +457,28 @@ namespace PlayersTab {
     static void StartNextXpCycle();
 
     static void RequestRejoinForDrainCompletion() {
-        std::vector<std::string> names;
+        size_t rejoinParticipantCount = 0;
         for (auto& entry : xpTrackedPlayers) {
             auto& tracked = entry.second;
             if (tracked.is_host) continue;
             tracked.needs_rejoin = true;
             tracked.disconnected_after_rejoin_request = !tracked.connected;
-            names.push_back(tracked.name);
+            ++rejoinParticipantCount;
         }
-        std::sort(names.begin(), names.end());
 
-        if (names.empty()) {
+        if (rejoinParticipantCount == 0) {
             LogXpControllerEvent("Drain round target reached with no tracked non-host participants to request rejoin.");
             StartNextXpCycle();
             return;
         }
 
-        BroadcastXpControllerPlayerList(
-            std::format("REJOIN NOW - WAIT {}s", xpFinalRejoinWindowSeconds), names);
+        QueueXpControllerChat("MC Rejoin now. If you don't, next loop starts without you.");
         LogXpControllerEvent(std::format(
             "Drain target reached ({}/{} rounds); requesting {} participant(s) to rejoin for up to {}s.",
-            xpDrainRoundsCompleted, xpDrainRoundsTarget, names.size(), xpFinalRejoinWindowSeconds));
+            xpDrainRoundsCompleted, xpDrainRoundsTarget, rejoinParticipantCount, xpFinalRejoinWindowSeconds));
         NotifyXpController(
             "Rejoin requested",
-            std::format("{} participant(s); waiting up to {}s.", names.size(), xpFinalRejoinWindowSeconds),
+            std::format("{} participant(s); waiting up to {}s.", rejoinParticipantCount, xpFinalRejoinWindowSeconds),
             ImVec4(1.f, 0.7f, 0.2f, 1.f));
         xpControllerStage = XpControllerStage::AwaitingRejoin;
         xpControllerDeadline = std::chrono::steady_clock::now()
@@ -507,6 +538,7 @@ namespace PlayersTab {
         xpRoleHostAssigned = false;
         xpRoleAssignmentStarted = false;
         xpRoleAssignmentComplete = false;
+        xpFarmingCycleAnnouncementPending = false;
         xpDrainRoundsCompleted = 0;
         xpDrainRoundsTarget = 0;
         xpPendingChatMessages.clear();
@@ -524,6 +556,170 @@ namespace PlayersTab {
         const int64_t totalDrainRounds =
             static_cast<int64_t>(xpFarmingDurationSeconds) * xpDrainRoundsPerMinute;
         return static_cast<int>((totalDrainRounds + 59) / 60);
+    }
+
+    static size_t CountXpControllerChatChunks(const std::string& message) {
+        constexpr size_t maxChatLength = 100;
+        const std::string chatMessage = SanitizeXpControllerChatText(message);
+        size_t chunks = 0;
+        size_t start = 0;
+        while (start < chatMessage.size()) {
+            size_t end = (std::min)(start + maxChatLength, chatMessage.size());
+            if (end < chatMessage.size()) {
+                const size_t lastSpace = chatMessage.rfind(' ', end);
+                if (lastSpace != std::string::npos && lastSpace > start) end = lastSpace;
+            }
+            ++chunks;
+            start = end;
+            while (start < chatMessage.size() && chatMessage[start] == ' ') ++start;
+        }
+        return chunks;
+    }
+
+    static size_t CountXpControllerPlayerListChunks(
+        const std::string& label,
+        const std::vector<std::string>& names) {
+        constexpr size_t maxChatLength = 100;
+        const std::string prefix = "MC " + label + ":";
+        std::string message = prefix;
+        size_t chunks = 0;
+        bool hasNames = false;
+
+        if (names.empty()) return CountXpControllerChatChunks(message + " none");
+
+        for (const auto& rawName : names) {
+            const std::string name = XpControllerChatName(rawName);
+            const std::string entry = (hasNames ? ", " : " ") + name;
+            if (message.size() + entry.size() > maxChatLength && hasNames) {
+                chunks += CountXpControllerChatChunks(message);
+                message = prefix;
+                hasNames = false;
+            }
+            if (entry.size() > maxChatLength - message.size()) {
+                chunks += CountXpControllerChatChunks(prefix + " " + name);
+            }
+            else {
+                message += entry;
+                hasNames = true;
+            }
+        }
+        if (hasNames || message != prefix) chunks += CountXpControllerChatChunks(message);
+        return chunks;
+    }
+
+    static int64_t GetXpFullCycleDurationEstimateSeconds() {
+        std::vector<std::pair<Game::PlayerId, std::string>> participants;
+        for (auto player : GetConnectedXpPlayers()) {
+            if (IsMatchCycleHost(player)) continue;
+            participants.emplace_back(
+                player->fields.PlayerId,
+                XpControllerChatName(XpPlayerName(player)));
+        }
+        if (participants.empty()) return 0;
+
+        const size_t teamCap = static_cast<size_t>((std::max)(
+            GetMatchCycleTeamCap(participants.size()), 1));
+        const size_t drainRounds = static_cast<size_t>((std::max)(GetXpDrainRoundsTarget(), 0));
+        std::vector<bool> completed(participants.size(), false);
+        for (const auto playerId : xpRoundImpostorIds) {
+            const auto it = std::find_if(participants.begin(), participants.end(), [playerId](const auto& participant) {
+                return participant.first == playerId;
+            });
+            if (it != participants.end()) {
+                completed[static_cast<size_t>(std::distance(participants.begin(), it))] = true;
+            }
+        }
+
+        size_t cursor = 0;
+        if (xpHasFarmingRotationCursor) {
+            const auto nextPlayer = std::lower_bound(
+                participants.begin(), participants.end(), xpFarmingRotationCursor,
+                [](const auto& participant, Game::PlayerId playerId) {
+                    return participant.first < playerId;
+                });
+            if (nextPlayer != participants.end()) {
+                cursor = static_cast<size_t>(std::distance(participants.begin(), nextPlayer));
+            }
+        }
+
+        int64_t estimate = xpFarmingDurationSeconds + 20 + xpRoundPrepareDelay.count();
+        estimate += xpFarmingAnnouncementDelay.count() + xpChatSendInterval.count();
+        size_t farmedCount = static_cast<size_t>(std::count(completed.begin(), completed.end(), true));
+        const auto addRecapEstimate = [&]() {
+            std::vector<std::string> farmedNames;
+            std::vector<std::string> neededNames;
+            for (size_t index = 0; index < participants.size(); ++index) {
+                (completed[index] ? farmedNames : neededNames).push_back(participants[index].second);
+            }
+            const size_t recapChunks =
+                CountXpControllerPlayerListChunks("FARMED", farmedNames)
+                + CountXpControllerPlayerListChunks("NEED", neededNames);
+            estimate += xpFarmingAnnouncementDelay.count();
+            if (recapChunks > 0) {
+                estimate += static_cast<int64_t>(recapChunks - 1) * xpChatSendInterval.count();
+            }
+        };
+        if (farmedCount < participants.size()) addRecapEstimate();
+
+        while (farmedCount < participants.size()) {
+            std::vector<size_t> selected;
+            size_t lastSelected = cursor;
+            for (size_t offset = 0; offset < participants.size() && selected.size() < teamCap; ++offset) {
+                const size_t index = (cursor + offset) % participants.size();
+                if (completed[index]) continue;
+                selected.push_back(index);
+                lastSelected = index;
+            }
+            if (selected.empty()) break;
+            for (const auto index : selected) {
+                completed[index] = true;
+                ++farmedCount;
+            }
+            cursor = (lastSelected + 1) % participants.size();
+            estimate += xpFarmingDurationSeconds + 20 + xpRoundPrepareDelay.count();
+            if (farmedCount < participants.size()) {
+                addRecapEstimate();
+            }
+        }
+
+        estimate += xpDrainAnnouncementDelay.count() + xpChatSendInterval.count();
+        estimate += static_cast<int64_t>(drainRounds) * xpRolloverDuration.count();
+        if (drainRounds > 1) {
+            estimate += static_cast<int64_t>(drainRounds - 1) * xpDrainBetweenRoundRejoinSeconds;
+        }
+        estimate += xpFinalRejoinWindowSeconds;
+        return estimate;
+    }
+
+    static std::string FormatXpDurationEstimate(int64_t totalSeconds) {
+        const int64_t totalMinutes = (totalSeconds + 59) / 60;
+        const int64_t hours = totalMinutes / 60;
+        const int64_t minutes = totalMinutes % 60;
+        return hours > 0
+            ? std::format("{}h {}m", hours, minutes)
+            : std::format("{}m", minutes);
+    }
+
+    static std::string BuildXpFarmingCycleAnnouncement(
+        const std::vector<std::string>& firstImpostorNames) {
+        int64_t estimate = GetXpFullCycleDurationEstimateSeconds();
+        std::string message;
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            std::string names = firstImpostorNames.empty() ? "none" : firstImpostorNames.front();
+            for (size_t i = 1; i < firstImpostorNames.size(); ++i) names += ", " + firstImpostorNames[i];
+            message = std::format(
+                "MC Farm {}s. First Imp: {}. Missed your turn? Next big loop in about {}.",
+                xpFarmingDurationSeconds, names, FormatXpDurationEstimate(estimate));
+            const size_t chunks = CountXpControllerChatChunks(message);
+            const int64_t sendSpacing = chunks > 1
+                ? static_cast<int64_t>(chunks - 1) * xpChatSendInterval.count()
+                : 0;
+            const int64_t updatedEstimate = GetXpFullCycleDurationEstimateSeconds()
+                + sendSpacing;
+            if (updatedEstimate == estimate) break;
+            estimate = updatedEstimate;
+        }
+        return message;
     }
 
     static bool ConfigureMatchCycleTeams(bool unearnedOnly) {
@@ -777,6 +973,19 @@ namespace PlayersTab {
     static void BeginXpFarmingRound() {
         if (!IsInLobby() || !IsHost()) return;
         if (!ConfigureMatchCycleTeams(true)) return;
+        if (xpFarmingCycleAnnouncementPending) {
+            std::vector<std::string> firstImpostorNames;
+            for (const auto playerId : xpRoundImpostorIds) {
+                const auto tracked = xpTrackedPlayers.find(playerId);
+                if (tracked != xpTrackedPlayers.end()) {
+                    firstImpostorNames.push_back(XpControllerChatName(tracked->second.name));
+                }
+            }
+            QueueXpControllerChat(
+                BuildXpFarmingCycleAnnouncement(firstImpostorNames),
+                xpFarmingAnnouncementDelay);
+            xpFarmingCycleAnnouncementPending = false;
+        }
         xpControllerPhase = XpControllerPhase::FARMING_ROUND;
         xpControllerStage = XpControllerStage::PreparingRound;
         xpControllerDeadline = std::chrono::steady_clock::now() + xpRoundPrepareDelay;
@@ -942,9 +1151,7 @@ namespace PlayersTab {
             std::format("Drain complete. Farming rounds: {}s.", xpFarmingDurationSeconds),
             ImVec4(0.f, 1.f, 0.5f, 1.f));
         xpControllerPhase = XpControllerPhase::FARMING_ROUND;
-        QueueXpControllerChat(
-            std::format("MC Farming: break shields fast; auto-ends in {}s.", xpFarmingDurationSeconds),
-            xpFarmingAnnouncementDelay);
+        xpFarmingCycleAnnouncementPending = true;
         BeginXpFarmingRound();
     }
 
@@ -1054,6 +1261,7 @@ namespace PlayersTab {
         xpDrainRoundsCompleted = 0;
         xpDrainRoundsTarget = 0;
         xpHasFarmingRotationCursor = false;
+        xpFarmingCycleAnnouncementPending = true;
         State.ForceEndAfterStartTriggered = false;
         for (auto player : GetConnectedXpPlayers()) {
             auto& tracked = xpTrackedPlayers[player->fields.PlayerId];
@@ -1076,9 +1284,6 @@ namespace PlayersTab {
         xpTransitionGraceDeadline = xpLastRosterCheck;
         xpHostAuthorityLostAt = {};
         LogXpControllerEvent(std::format("Match Cycle started. {}", BuildXpControllerDiagnostics()));
-        QueueXpControllerChat(
-            std::format("MC Farming: break shields fast; auto-ends in {}s.", xpFarmingDurationSeconds),
-            xpFarmingAnnouncementDelay);
         BeginXpFarmingRound();
         Toasts::AddToast("XP Controller", "Starting the farming rounds.", ImVec4(0.f, 1.f, 0.5f, 1.f));
     }
@@ -1238,8 +1443,11 @@ namespace PlayersTab {
                 xpDrainRoundsTarget = GetXpDrainRoundsTarget();
                 xpControllerPhase = XpControllerPhase::ROLLOVER_LOOP;
                 QueueXpControllerChat(std::format(
-                    "MC Drain starts in 30s: {} rounds; {}s rejoin between. Miss it, game starts.",
+                    "MC Drain starts in 30s: {} rounds, {}s between; each auto-ends in 35s.",
                     xpDrainRoundsTarget, xpDrainBetweenRoundRejoinSeconds),
+                    std::chrono::seconds::zero());
+                QueueXpControllerChat(
+                    "MC After drain, rejoin. If you don't, next loop starts without you.",
                     xpDrainAnnouncementDelay);
                 LogXpControllerEvent(std::format(
                     "All connected non-host participants completed farming; beginning fixed drain sequence of {} rounds ({} per farming minute, farmingDuration={}s). {}",
