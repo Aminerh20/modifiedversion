@@ -818,6 +818,12 @@ namespace PlayersTab {
             }
         };
         if (unearnedOnly) selectImpostors(true);
+        else if (xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP
+            && !nonHostPlayers.empty()) {
+            const auto randomIndex = static_cast<size_t>(
+                GenerateRandomNumber(0, static_cast<int>(nonHostPlayers.size() - 1)));
+            impostors.push_back(nonHostPlayers[randomIndex]);
+        }
 
         if (unearnedOnly && impostors.empty()) {
             for (auto player : players) {
@@ -877,8 +883,9 @@ namespace PlayersTab {
         }
         else {
             NotifyXpController(
-                "Auto-drain batch",
-                "All players are Crewmates; protection is off.",
+                "Auto-drain role selected",
+                std::format("{} is the random Impostor; protection is off.",
+                    impostors.empty() ? "No player" : XpPlayerName(impostors.front())),
                 ImVec4(1.f, 0.7f, 0.2f, 1.f));
         }
 
