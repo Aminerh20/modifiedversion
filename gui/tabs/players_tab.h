@@ -63,8 +63,6 @@ namespace PlayersTab {
 	void StartXpLevelRecorder();
 	void ClearXpLevelRecorder();
 	bool IsXpLevelRecorderRunning();
-	int GetXpLevelTolerance();
-	void SetXpLevelTolerance(int tolerance);
 	std::string GetXpLevelRecorderStatus();
 	void TickXpController();
 	void OnXpControllerGameStarted();
