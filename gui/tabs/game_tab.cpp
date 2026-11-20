@@ -250,7 +250,7 @@ namespace GameTab {
                         PlayersTab::SetXpFarmingConfirmationMode(confirmFarming);
                     }
                     ImGui::TextDisabled(
-                        "Assigned Impostors have 30s to type DONE or RETRY. Only DONE completes farming; no reply retries. Off keeps automatic credit.");
+                        "After a 20s lobby grace period, assigned Impostors have 30s to type DONE or RETRY. Only RETRY repeats; no reply counts as DONE. Off keeps automatic credit.");
 
                     bool drainUntilStop = PlayersTab::GetXpDrainUntilStopMode();
                     if (ImGui::Checkbox("Drain until someone types STOP", &drainUntilStop)) {
@@ -271,7 +271,7 @@ namespace GameTab {
                         drainRoundTarget, PlayersTab::GetXpDrainBetweenRoundRejoinSeconds());
                 }
                 ImGui::TextDisabled(
-                    "When draining ends, the cycle asks players to rejoin and waits up to %ds before farming restarts.",
+                    "When draining ends, the cycle asks players to rejoin and waits the full %ds before farming restarts, even if everyone reconnects early.",
                     PlayersTab::GetXpFinalRejoinWindowSeconds());
 
                 if (!PlayersTab::IsXpControllerRunning()) {
