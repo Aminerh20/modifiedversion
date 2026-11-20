@@ -85,6 +85,7 @@ namespace PlayersTab {
     static XpControllerStage xpControllerStage = XpControllerStage::PreparingRound;
     static std::unordered_map<Game::PlayerId, XpTrackedPlayer> xpTrackedPlayers;
     static std::vector<Game::PlayerId> xpRoundImpostorIds;
+    static std::vector<std::string> xpRoundImpostorNames;
     static std::unordered_map<Game::PlayerId, bool> xpFarmingConfirmationResponses;
     static std::unordered_set<Game::PlayerId> xpFarmingCompletedPlayerIds;
     static std::chrono::steady_clock::time_point xpControllerDeadline;
@@ -576,6 +577,7 @@ namespace PlayersTab {
         xpControllerStage = XpControllerStage::PreparingRound;
         xpHostAuthorityLostAt = {};
         xpRoundImpostorIds.clear();
+        xpRoundImpostorNames.clear();
         xpFarmingConfirmationResponses.clear();
         xpFarmingCompletedPlayerIds.clear();
         xpDrainStopRequested = false;
@@ -812,6 +814,7 @@ namespace PlayersTab {
         }
 
         xpRoundImpostorIds.clear();
+        xpRoundImpostorNames.clear();
         xpRolesPendingAssignment.clear();
         xpRoleAssignmentCursor = 0;
         xpRoleAssignedPlayers = 0;
@@ -890,9 +893,12 @@ namespace PlayersTab {
         }
         xpRoundImpostorIds.clear();
         xpRoundImpostorIds.reserve(impostors.size());
+        xpRoundImpostorNames.clear();
+        xpRoundImpostorNames.reserve(impostors.size());
         std::string impostorIds;
         for (auto player : impostors) {
             xpRoundImpostorIds.push_back(player->fields.PlayerId);
+            xpRoundImpostorNames.push_back(XpControllerChatName(XpPlayerName(player)));
             if (!impostorIds.empty()) impostorIds += ",";
             impostorIds += std::format("{}", player->fields.PlayerId);
         }
@@ -1198,11 +1204,15 @@ namespace PlayersTab {
     static void BeginXpFarmingConfirmationWindow() {
         xpFarmingConfirmationResponses.clear();
         std::string assignedNames;
-        for (const auto playerId : xpRoundImpostorIds) {
-            const auto tracked = xpTrackedPlayers.find(playerId);
-            if (tracked == xpTrackedPlayers.end()) continue;
+        std::string assignedDetails;
+        for (size_t assignedIndex = 0; assignedIndex < xpRoundImpostorIds.size(); ++assignedIndex) {
             if (!assignedNames.empty()) assignedNames += ", ";
-            assignedNames += XpControllerChatName(tracked->second.name);
+            const std::string name = assignedIndex < xpRoundImpostorNames.size()
+                ? xpRoundImpostorNames[assignedIndex]
+                : std::format("Player {}", xpRoundImpostorIds[assignedIndex]);
+            assignedNames += name;
+            if (!assignedDetails.empty()) assignedDetails += ", ";
+            assignedDetails += std::format("{}='{}'", xpRoundImpostorIds[assignedIndex], name);
         }
         QueueXpControllerChat(std::format(
             "Farming check for {}: reply DONE if you got enough XP, or RETRY if you need another turn.",
@@ -1213,8 +1223,8 @@ namespace PlayersTab {
         xpControllerStage = XpControllerStage::FarmingConfirmations;
         xpControllerDeadline = (std::chrono::steady_clock::time_point::max)();
         LogXpControllerEvent(std::format(
-            "Queued farming confirmation prompt for assigned IDs [{}]; the response window starts after both messages are sent.",
-            assignedNames));
+            "Queued farming confirmation prompt for assigned players [{}]; the response window starts after both messages are sent.",
+            assignedDetails));
     }
 
     static void ProcessXpFarmingConfirmations() {
@@ -1292,6 +1302,7 @@ namespace PlayersTab {
         }
         xpFarmingCompletedPlayerIds.clear();
         xpRoundImpostorIds.clear();
+        xpRoundImpostorNames.clear();
         xpDrainRoundsCompleted = 0;
         xpDrainRoundsTarget = 0;
         LogXpControllerEvent(std::format(
@@ -1488,6 +1499,7 @@ namespace PlayersTab {
         xpTrackedPlayers.clear();
         xpFarmingCompletedPlayerIds.clear();
         xpRoundImpostorIds.clear();
+        xpRoundImpostorNames.clear();
         xpFarmingConfirmationResponses.clear();
         xpPendingChatMessages.clear();
         xpRoundChatWait = std::chrono::milliseconds::zero();
