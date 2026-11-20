@@ -81,6 +81,33 @@ namespace PlayersTab {
         std::chrono::seconds delayAfterSend{0};
     };
 
+    struct XpLevelBaseline {
+        uint32_t originalLevel = 0;
+        uint32_t lastLevel = 0;
+        bool patchDetected = false;
+        bool rejoinRequested = false;
+        std::string name;
+    };
+
+    struct XpControllerSnapshot {
+        XpControllerPhase phase = XpControllerPhase::STOPPED;
+        XpControllerStage stage = XpControllerStage::PreparingRound;
+        bool valid = false;
+        bool deadlineIsMax = false;
+        int64_t deadlineRemainingMs = 0;
+        int64_t transitionRemainingMs = 0;
+        int drainRoundsCompleted = 0;
+        int drainRoundsTarget = 0;
+        bool drainStopRequested = false;
+        Game::PlayerId farmingRotationCursor = 0;
+        bool hasFarmingRotationCursor = false;
+        std::vector<Game::PlayerId> roundImpostorIds;
+        std::vector<std::string> roundImpostorNames;
+        std::unordered_set<Game::PlayerId> completedPlayerIds;
+        std::unordered_set<Game::PlayerId> retryPlayerIds;
+        std::unordered_map<Game::PlayerId, bool> confirmationResponses;
+    };
+
     static XpControllerPhase xpControllerPhase = XpControllerPhase::STOPPED;
     static XpControllerStage xpControllerStage = XpControllerStage::PreparingRound;
     static std::unordered_map<Game::PlayerId, XpTrackedPlayer> xpTrackedPlayers;
@@ -88,6 +115,7 @@ namespace PlayersTab {
     static std::vector<std::string> xpRoundImpostorNames;
     static std::unordered_map<Game::PlayerId, bool> xpFarmingConfirmationResponses;
     static std::unordered_set<Game::PlayerId> xpFarmingCompletedPlayerIds;
+    static std::unordered_set<Game::PlayerId> xpFarmingRetryPlayerIds;
     static std::chrono::steady_clock::time_point xpControllerDeadline;
     static std::chrono::steady_clock::time_point xpLastRosterCheck;
     static std::chrono::steady_clock::time_point xpTransitionGraceDeadline;
@@ -119,6 +147,14 @@ namespace PlayersTab {
     static bool xpDrainRejoinGracePending = false;
     static bool xpDrainRejoinNoticePendingStart = false;
     static bool xpDrainMeetingAnnouncementPending = false;
+    static bool xpControllerPaused = false;
+    static bool xpPauseDeadlineIsMax = false;
+    static int64_t xpPauseDeadlineRemainingMs = 0;
+    static XpControllerSnapshot xpControllerSnapshot;
+    static bool xpLevelRecorderRunning = false;
+    static int xpLevelPatchTolerance = 5;
+    static std::unordered_map<Game::PlayerId, XpLevelBaseline> xpLevelBaselines;
+    static std::chrono::steady_clock::time_point xpLevelRejoinDeadline;
     static Game::PlayerId xpFarmingRotationCursor = 0;
     static bool xpHasFarmingRotationCursor = false;
     static XpControllerStage xpStageBeforeParticipantWait = XpControllerStage::PreparingRound;
@@ -590,11 +626,15 @@ namespace PlayersTab {
             reason, BuildXpControllerDiagnostics()));
         xpControllerPhase = XpControllerPhase::STOPPED;
         xpControllerStage = XpControllerStage::PreparingRound;
+        xpControllerPaused = false;
+        xpPauseDeadlineRemainingMs = 0;
+        xpControllerSnapshot.valid = false;
         xpHostAuthorityLostAt = {};
         xpRoundImpostorIds.clear();
         xpRoundImpostorNames.clear();
         xpFarmingConfirmationResponses.clear();
         xpFarmingCompletedPlayerIds.clear();
+        xpFarmingRetryPlayerIds.clear();
         xpDrainStopRequested = false;
         xpDrainRejoinGracePending = false;
         xpDrainRejoinNoticePendingStart = false;
@@ -884,7 +924,34 @@ namespace PlayersTab {
                 lastSelectedIndex = index;
             }
         };
-        if (unearnedOnly) selectImpostors(true);
+        if (unearnedOnly) {
+            const auto addEligible = [&](bool retryPriority) {
+                for (size_t offset = 0;
+                    offset < nonHostPlayers.size()
+                    && impostors.size() < static_cast<size_t>(teamCap);
+                    ++offset) {
+                    const size_t index = (startIndex + offset) % nonHostPlayers.size();
+                    auto player = nonHostPlayers[index];
+                    const auto playerId = player->fields.PlayerId;
+                    auto it = xpTrackedPlayers.find(playerId);
+                    if (it == xpTrackedPlayers.end()
+                        || xpFarmingCompletedPlayerIds.contains(playerId)
+                        || it->second.has_completed_objective
+                        || (!retryPriority && it->second.has_farming_attempt)
+                        || (retryPriority != xpFarmingRetryPlayerIds.contains(playerId))) continue;
+                    impostors.push_back(player);
+                    lastSelectedIndex = index;
+                }
+            };
+
+            if (xpFarmingConfirmationMode) {
+                addEligible(true);
+                addEligible(false);
+            }
+            else {
+                selectImpostors(true);
+            }
+        }
         else if (xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP
             && !nonHostPlayers.empty()) {
             const auto randomIndex = static_cast<size_t>(
@@ -893,16 +960,18 @@ namespace PlayersTab {
         }
 
         if (unearnedOnly && impostors.empty()) {
-            for (auto player : players) {
-                if (IsMatchCycleHost(player)) continue;
-                auto it = xpTrackedPlayers.find(player->fields.PlayerId);
-                if (it != xpTrackedPlayers.end()
-                    && !xpFarmingCompletedPlayerIds.contains(player->fields.PlayerId)
-                    && !it->second.has_completed_objective) {
-                    it->second.has_farming_attempt = false;
+            if (!xpFarmingConfirmationMode) {
+                for (auto player : players) {
+                    if (IsMatchCycleHost(player)) continue;
+                    auto it = xpTrackedPlayers.find(player->fields.PlayerId);
+                    if (it != xpTrackedPlayers.end()
+                        && !xpFarmingCompletedPlayerIds.contains(player->fields.PlayerId)
+                        && !it->second.has_completed_objective) {
+                        it->second.has_farming_attempt = false;
+                    }
                 }
+                selectImpostors(false);
             }
-            selectImpostors(false);
         }
 
         if (unearnedOnly && impostors.empty()) {
@@ -976,8 +1045,11 @@ namespace PlayersTab {
 
         if (unearnedOnly) {
             std::vector<Game::PlayerId> desiredShields;
+            const size_t actualShieldCap = (std::min)(
+                static_cast<size_t>((std::max)(teamCap, 0)),
+                defenders.size());
             for (auto player : defenders) {
-                if (desiredShields.size() == static_cast<size_t>(teamCap)) break;
+                if (desiredShields.size() == actualShieldCap) break;
                 desiredShields.push_back(player->fields.PlayerId);
             }
 
@@ -1108,7 +1180,8 @@ namespace PlayersTab {
                 nextBatchNames += name;
             }
             QueueXpControllerChat(std::format(
-                "Next farming batch: {}.",
+                "Next farming batch ({}): {}.",
+                xpRoundImpostorNames.size(),
                 nextBatchNames.empty() ? "none" : nextBatchNames));
         }
         xpControllerPhase = XpControllerPhase::FARMING_ROUND;
@@ -1248,10 +1321,11 @@ namespace PlayersTab {
             assignedDetails += std::format("{}='{}'", xpRoundImpostorIds[assignedIndex], name);
         }
         QueueXpControllerChat(std::format(
-            "Farming check for {}: assigned players only reply DONE or RETRY.",
-            assignedNames.empty() ? "the assigned Impostors" : assignedNames));
+            "Farming batch ({}): {}.",
+            xpRoundImpostorIds.size(),
+            assignedNames.empty() ? "none" : assignedNames));
         QueueXpControllerChat(
-            "30 seconds to reply. DONE or no reply completes; RETRY requests another turn. First reply only; duplicates ignored.");
+            "Type DONE or RETRY in 30s. DONE/no reply=DONE. RETRY=another turn.");
 
         xpControllerStage = XpControllerStage::FarmingConfirmations;
         xpControllerDeadline = (std::chrono::steady_clock::time_point::max)();
@@ -1283,6 +1357,8 @@ namespace PlayersTab {
             tracked->second.has_completed_objective = completed;
             if (completed) xpFarmingCompletedPlayerIds.insert(playerId);
             else xpFarmingCompletedPlayerIds.erase(playerId);
+            if (completed) xpFarmingRetryPlayerIds.erase(playerId);
+            else xpFarmingRetryPlayerIds.insert(playerId);
             if (completed) ++completedCount;
         }
         QueueXpControllerChat(resultSummary + ".");
@@ -1295,6 +1371,7 @@ namespace PlayersTab {
     }
 
     static void HandleXpRoundReturnedToLobby() {
+        CheckXpLevelPatchAfterRound();
         if (xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP) {
             ++xpDrainRoundsCompleted;
             LogXpControllerEvent(std::format(
@@ -1354,6 +1431,7 @@ namespace PlayersTab {
         xpFarmingCompletedPlayerIds.clear();
         xpRoundImpostorIds.clear();
         xpRoundImpostorNames.clear();
+        xpFarmingRetryPlayerIds.clear();
         xpDrainRoundsCompleted = 0;
         xpDrainRoundsTarget = 0;
         LogXpControllerEvent(std::format(
@@ -1460,6 +1538,220 @@ namespace PlayersTab {
         xpDrainUntilStopMode = enabled;
     }
 
+    void PauseXpController() {
+        if (!IsXpControllerRunning() || xpControllerPaused) return;
+        xpControllerPaused = true;
+        xpPauseDeadlineIsMax =
+            xpControllerDeadline == (std::chrono::steady_clock::time_point::max)();
+        xpPauseDeadlineRemainingMs = xpPauseDeadlineIsMax
+            ? 0
+            : (std::max)(int64_t{0},
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    xpControllerDeadline - std::chrono::steady_clock::now()).count());
+        LogXpControllerEvent(std::format(
+            "Match Cycle paused with {}ms remaining.",
+            xpPauseDeadlineRemainingMs));
+    }
+
+    void ResumeXpController() {
+        if (!IsXpControllerRunning() || !xpControllerPaused) return;
+        const auto now = std::chrono::steady_clock::now();
+        xpControllerPaused = false;
+        xpControllerDeadline = xpPauseDeadlineIsMax
+            ? (std::chrono::steady_clock::time_point::max)()
+            : now + std::chrono::milliseconds(xpPauseDeadlineRemainingMs);
+        LogXpControllerEvent(std::format(
+            "Match Cycle resumed with {}ms remaining.",
+            xpPauseDeadlineRemainingMs));
+    }
+
+    bool IsXpControllerPaused() {
+        return xpControllerPaused;
+    }
+
+    void SaveXpControllerSnapshot() {
+        xpControllerSnapshot.valid = IsXpControllerRunning();
+        xpControllerSnapshot.phase = xpControllerPhase;
+        xpControllerSnapshot.stage = xpControllerStage;
+        xpControllerSnapshot.deadlineIsMax =
+            xpControllerDeadline == (std::chrono::steady_clock::time_point::max)();
+        xpControllerSnapshot.deadlineRemainingMs = xpControllerSnapshot.deadlineIsMax
+            ? 0
+            : (std::max)(int64_t{0},
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    xpControllerDeadline - std::chrono::steady_clock::now()).count());
+        xpControllerSnapshot.transitionRemainingMs =
+            xpTransitionGraceDeadline == std::chrono::steady_clock::time_point{}
+            ? 0
+            : (std::max)(int64_t{0},
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    xpTransitionGraceDeadline - std::chrono::steady_clock::now()).count());
+        xpControllerSnapshot.drainRoundsCompleted = xpDrainRoundsCompleted;
+        xpControllerSnapshot.drainRoundsTarget = xpDrainRoundsTarget;
+        xpControllerSnapshot.drainStopRequested = xpDrainStopRequested;
+        xpControllerSnapshot.farmingRotationCursor = xpFarmingRotationCursor;
+        xpControllerSnapshot.hasFarmingRotationCursor = xpHasFarmingRotationCursor;
+        xpControllerSnapshot.roundImpostorIds = xpRoundImpostorIds;
+        xpControllerSnapshot.roundImpostorNames = xpRoundImpostorNames;
+        xpControllerSnapshot.completedPlayerIds = xpFarmingCompletedPlayerIds;
+        xpControllerSnapshot.retryPlayerIds = xpFarmingRetryPlayerIds;
+        xpControllerSnapshot.confirmationResponses = xpFarmingConfirmationResponses;
+        NotifyXpController(
+            "Match Cycle snapshot saved",
+            "Pause and restore this exact controller state.",
+            ImVec4(0.2f, 0.8f, 1.f, 1.f));
+    }
+
+    bool LoadXpControllerSnapshot() {
+        if (!xpControllerSnapshot.valid) return false;
+        xpControllerPhase = xpControllerSnapshot.phase;
+        xpControllerStage = xpControllerSnapshot.stage;
+        xpDrainRoundsCompleted = xpControllerSnapshot.drainRoundsCompleted;
+        xpDrainRoundsTarget = xpControllerSnapshot.drainRoundsTarget;
+        xpDrainStopRequested = xpControllerSnapshot.drainStopRequested;
+        xpFarmingRotationCursor = xpControllerSnapshot.farmingRotationCursor;
+        xpHasFarmingRotationCursor = xpControllerSnapshot.hasFarmingRotationCursor;
+        xpRoundImpostorIds = xpControllerSnapshot.roundImpostorIds;
+        xpRoundImpostorNames = xpControllerSnapshot.roundImpostorNames;
+        xpFarmingCompletedPlayerIds = xpControllerSnapshot.completedPlayerIds;
+        xpFarmingRetryPlayerIds = xpControllerSnapshot.retryPlayerIds;
+        xpFarmingConfirmationResponses = xpControllerSnapshot.confirmationResponses;
+        const auto now = std::chrono::steady_clock::now();
+        xpControllerDeadline = xpControllerSnapshot.deadlineIsMax
+            ? (std::chrono::steady_clock::time_point::max)()
+            : now + std::chrono::milliseconds(xpControllerSnapshot.deadlineRemainingMs);
+        xpTransitionGraceDeadline =
+            now + std::chrono::milliseconds(xpControllerSnapshot.transitionRemainingMs);
+        xpControllerPaused = false;
+        NotifyXpController(
+            "Match Cycle snapshot loaded",
+            "The saved phase, round, and player state were restored.",
+            ImVec4(0.2f, 0.8f, 1.f, 1.f));
+        return true;
+    }
+
+    void StartXpLevelRecorder() {
+        xpLevelRecorderRunning = true;
+        xpLevelRejoinDeadline = {};
+        for (auto player : GetConnectedXpPlayers()) {
+            const auto playerId = player->fields.PlayerId;
+            auto data = GetPlayerData(player);
+            if (data == nullptr) continue;
+            auto& baseline = xpLevelBaselines.try_emplace(playerId).first->second;
+            baseline.originalLevel = data->fields.PlayerLevel + 1;
+            baseline.lastLevel = baseline.originalLevel;
+            baseline.patchDetected = false;
+            baseline.rejoinRequested = false;
+            baseline.name = XpPlayerName(player);
+        }
+        NotifyXpController(
+            "Level recorder started",
+            "Baselines will be checked after each completed Match Cycle round.",
+            ImVec4(0.2f, 0.8f, 1.f, 1.f));
+    }
+
+    void ClearXpLevelRecorder() {
+        xpLevelRecorderRunning = false;
+        xpLevelBaselines.clear();
+        xpLevelRejoinDeadline = {};
+        NotifyXpController(
+            "Level recorder cleared",
+            "All saved level baselines were removed.",
+            ImVec4(0.2f, 0.8f, 1.f, 1.f));
+    }
+
+    bool IsXpLevelRecorderRunning() {
+        return xpLevelRecorderRunning;
+    }
+
+    int GetXpLevelTolerance() {
+        return xpLevelPatchTolerance;
+    }
+
+    void SetXpLevelTolerance(int tolerance) {
+        xpLevelPatchTolerance = (std::clamp)(tolerance, 0, 100);
+    }
+
+    static void RecordConnectedXpLevels() {
+        if (!xpLevelRecorderRunning) return;
+        for (auto player : GetConnectedXpPlayers()) {
+            if (IsMatchCycleHost(player)) continue;
+            const auto playerId = player->fields.PlayerId;
+            auto data = GetPlayerData(player);
+            if (data == nullptr) continue;
+            const uint32_t level = data->fields.PlayerLevel + 1;
+            auto it = xpLevelBaselines.find(playerId);
+            if (it == xpLevelBaselines.end()) {
+                xpLevelBaselines[playerId] = {
+                    level,
+                    level,
+                    false,
+                    false,
+                    XpPlayerName(player),
+                };
+            }
+            else {
+                it->second.lastLevel = level;
+                it->second.name = XpPlayerName(player);
+            }
+        }
+    }
+
+    static void CheckXpLevelPatchAfterRound() {
+        if (!xpLevelRecorderRunning) return;
+        RecordConnectedXpLevels();
+
+        std::vector<std::string> patchedNames;
+        for (auto& [playerId, baseline] : xpLevelBaselines) {
+            if (baseline.rejoinRequested || baseline.patchDetected) continue;
+            auto player = GetPlayerControlById(playerId);
+            if (player == nullptr) continue;
+            auto data = GetPlayerData(player);
+            if (data == nullptr) continue;
+            const uint32_t currentLevel = data->fields.PlayerLevel + 1;
+            baseline.lastLevel = currentLevel;
+            if (baseline.originalLevel != 0
+                && currentLevel >= baseline.originalLevel
+                && currentLevel <= baseline.originalLevel
+                    + static_cast<uint32_t>((std::max)(xpLevelPatchTolerance, 0))) {
+                baseline.patchDetected = true;
+                baseline.rejoinRequested = true;
+                patchedNames.push_back(baseline.name);
+                LogXpControllerEvent(std::format(
+                    "Level patch detected after round: playerId={}, name='{}', original={}, current={}, tolerance={}.",
+                    playerId, baseline.name, baseline.originalLevel, currentLevel,
+                    xpLevelPatchTolerance));
+            }
+        }
+
+        if (!patchedNames.empty()) {
+            std::string names = patchedNames.front();
+            for (size_t i = 1; i < patchedNames.size(); ++i) names += ", " + patchedNames[i];
+            QueueXpControllerChat(std::format(
+                "LEVEL PATCH DETECTED: {}. Rejoin within 30 seconds.",
+                names));
+            xpLevelRejoinDeadline = std::chrono::steady_clock::now()
+                + std::chrono::seconds(30);
+        }
+    }
+
+    std::string GetXpLevelRecorderStatus() {
+        if (!xpLevelRecorderRunning) return "Level recorder: OFF";
+        size_t patched = 0;
+        size_t awaiting = 0;
+        for (const auto& [playerId, baseline] : xpLevelBaselines) {
+            if (baseline.rejoinRequested || baseline.patchDetected) {
+                ++patched;
+            }
+            else if (baseline.originalLevel != 0) {
+                ++awaiting;
+            }
+        }
+        return std::format(
+            "Level recorder: ON | {} tracked | {} patch detected | {} awaiting",
+            xpLevelBaselines.size(), patched, awaiting);
+    }
+
     void OnXpControllerChatMessage(Game::PlayerId playerId, const std::string& message) {
         if (!IsXpControllerRunning() || !IsHost()) return;
 
@@ -1487,6 +1779,8 @@ namespace PlayersTab {
                 tracked->second.has_earned_xp = completed;
                 tracked->second.has_completed_objective = completed;
             }
+            if (completed) xpFarmingRetryPlayerIds.erase(playerId);
+            else xpFarmingRetryPlayerIds.insert(playerId);
             LogXpControllerEvent(std::format(
                 "Farming confirmation received: playerId={}, response={}.",
                 playerId, completed ? "DONE" : "RETRY"));
@@ -1579,6 +1873,7 @@ namespace PlayersTab {
 
         xpTrackedPlayers.clear();
         xpFarmingCompletedPlayerIds.clear();
+        xpFarmingRetryPlayerIds.clear();
         xpRoundImpostorIds.clear();
         xpRoundImpostorNames.clear();
         xpFarmingConfirmationResponses.clear();
@@ -1595,6 +1890,9 @@ namespace PlayersTab {
         xpDrainRejoinNoticePendingStart = false;
         xpDrainMeetingAnnouncementPending = false;
         xpPendingInGameChatMessages.clear();
+        xpControllerPaused = false;
+        xpPauseDeadlineRemainingMs = 0;
+        xpControllerSnapshot.valid = false;
         xpHasFarmingRotationCursor = false;
         xpFarmingCycleAnnouncementPending = true;
         State.ForceEndAfterStartTriggered = false;
@@ -1632,6 +1930,7 @@ namespace PlayersTab {
 
     std::string GetXpControllerStatus() {
         if (!IsXpControllerRunning()) return "Stopped";
+        if (xpControllerPaused) return "MATCH CYCLE PAUSED";
         if (xpControllerStage == XpControllerStage::AwaitingRejoin
             && xpDrainRejoinNoticePendingStart) {
             return "Sending drain-ended rejoin notice";
@@ -1659,29 +1958,61 @@ namespace PlayersTab {
             break;
         case XpControllerPhase::STOPPED: break;
         }
+        size_t trackedCount = 0;
+        size_t disconnectedCount = 0;
+        size_t needingRejoinCount = 0;
+        for (const auto& [playerId, tracked] : xpTrackedPlayers) {
+            if (tracked.is_host) continue;
+            ++trackedCount;
+            if (!tracked.connected) ++disconnectedCount;
+            if (tracked.needs_rejoin) ++needingRejoinCount;
+        }
+        const std::string rosterStatus = std::format(
+            " | {} tracked / {} disconnected / {} needing rejoin",
+            trackedCount, disconnectedCount, needingRejoinCount);
         if (xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP) {
             if (xpControllerStage == XpControllerStage::AwaitingRejoin) {
-                return std::format("Drain rounds complete - rejoin window - {}s", remaining);
+                return std::format("Drain rounds complete - rejoin window - {}s{}", remaining, rosterStatus);
             }
             if (xpDrainUntilStopMode) {
                 return std::format(
-                    "{} - round {} (until STOP) - {}s",
-                    phaseName, xpDrainRoundsCompleted + 1, remaining);
+                    "{} - round {} (until STOP) - {}s{}",
+                    phaseName, xpDrainRoundsCompleted + 1, remaining, rosterStatus);
             }
             return std::format(
-                "{} - round {}/{} - {}s",
-                phaseName, xpDrainRoundsCompleted + 1, xpDrainRoundsTarget, remaining);
+                "{} - round {}/{} - {}s{}",
+                phaseName, xpDrainRoundsCompleted + 1, xpDrainRoundsTarget, remaining, rosterStatus);
         }
-        return std::format("{} - {}s", phaseName, remaining);
+        return std::format("{} - {}s{}", phaseName, remaining, rosterStatus);
     }
 
     void TickXpController() {
         g_rpcEmittedThisFrame = 0;
+        RecordConnectedXpLevels();
+        if (xpLevelRejoinDeadline != std::chrono::steady_clock::time_point{}
+            && std::chrono::steady_clock::now() >= xpLevelRejoinDeadline) {
+            xpLevelRejoinDeadline = {};
+            size_t waitingCount = 0;
+            for (auto& [playerId, baseline] : xpLevelBaselines) {
+                if (!baseline.rejoinRequested) continue;
+                baseline.rejoinRequested = false;
+                ++waitingCount;
+            }
+            if (waitingCount > 0 && IsInLobby()) {
+                QueueXpControllerChat(std::format(
+                    "LEVEL PATCH rejoin window ended. {} player(s) not confirmed.",
+                    waitingCount));
+            }
+            LogXpControllerEvent(std::format(
+                "Level patch rejoin window ended for {} player(s).",
+                waitingCount));
+        }
         if (!IsXpControllerRunning()) return;
         if (State.PanicMode) {
             StopXpController("Stopped because panic mode was enabled.");
             return;
         }
+        if (xpControllerPaused) return;
         State.NoGameEnd = true;
         ProcessPendingXpControllerRoles();
         const auto now = std::chrono::steady_clock::now();

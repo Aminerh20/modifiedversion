@@ -53,6 +53,17 @@ namespace PlayersTab {
 	void SetXpFarmingConfirmationMode(bool enabled);
 	bool GetXpDrainUntilStopMode();
 	void SetXpDrainUntilStopMode(bool enabled);
+	void PauseXpController();
+	void ResumeXpController();
+	bool IsXpControllerPaused();
+	void SaveXpControllerSnapshot();
+	bool LoadXpControllerSnapshot();
+	void StartXpLevelRecorder();
+	void ClearXpLevelRecorder();
+	bool IsXpLevelRecorderRunning();
+	int GetXpLevelTolerance();
+	void SetXpLevelTolerance(int tolerance);
+	std::string GetXpLevelRecorderStatus();
 	void TickXpController();
 	void OnXpControllerGameStarted();
 	void OnXpControllerChatMessage(Game::PlayerId playerId, const std::string& message);

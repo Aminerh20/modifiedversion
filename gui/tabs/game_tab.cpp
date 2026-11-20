@@ -243,6 +243,48 @@ namespace GameTab {
                 if (ImGui::InputInt("Rejoin wait after drain (seconds)", &finalRejoinWindowSeconds)) {
                     PlayersTab::SetXpFinalRejoinWindowSeconds(finalRejoinWindowSeconds);
                 }
+                ImGui::Dummy(ImVec2(4, 4) * State.dpiScale);
+                ImGui::Separator();
+                ImGui::TextDisabled("Level recorder");
+                ImGui::TextWrapped("%s", PlayersTab::GetXpLevelRecorderStatus().c_str());
+                if (!PlayersTab::IsXpLevelRecorderRunning()) {
+                    if (AnimatedButton("Start Level Recorder")) {
+                        PlayersTab::StartXpLevelRecorder();
+                    }
+                }
+                else {
+                    if (AnimatedButton("Clear Level Recorder")) {
+                        PlayersTab::ClearXpLevelRecorder();
+                    }
+                }
+                int levelTolerance = PlayersTab::GetXpLevelTolerance();
+                ImGui::SetNextItemWidth(180 * State.dpiScale);
+                if (ImGui::InputInt("Patch level tolerance", &levelTolerance)) {
+                    PlayersTab::SetXpLevelTolerance(levelTolerance);
+                }
+                ImGui::TextDisabled("Checks baselines only immediately after a Match Cycle farming or drain round.");
+
+                ImGui::Dummy(ImVec2(4, 4) * State.dpiScale);
+                ImGui::TextDisabled("Match Cycle pause / snapshot");
+                if (!PlayersTab::IsXpControllerRunning()) {
+                    ImGui::TextDisabled("Start Match Cycle to enable Pause and Resume.");
+                }
+                else if (PlayersTab::IsXpControllerPaused()) {
+                    if (AnimatedButton("Resume Match Cycle")) {
+                        PlayersTab::ResumeXpController();
+                    }
+                }
+                else if (AnimatedButton("Pause Match Cycle")) {
+                    PlayersTab::PauseXpController();
+                }
+                ImGui::SameLine();
+                if (AnimatedButton("Save Snapshot")) {
+                    PlayersTab::SaveXpControllerSnapshot();
+                }
+                ImGui::SameLine();
+                if (AnimatedButton("Load Snapshot")) {
+                    PlayersTab::LoadXpControllerSnapshot();
+                }
                 const bool cycleRunning = PlayersTab::IsXpControllerRunning();
                 if (!cycleRunning) {
                     bool confirmFarming = PlayersTab::GetXpFarmingConfirmationMode();
@@ -250,7 +292,7 @@ namespace GameTab {
                         PlayersTab::SetXpFarmingConfirmationMode(confirmFarming);
                     }
                     ImGui::TextDisabled(
-                        "After a 20s lobby grace period, assigned Impostors have 30s to type DONE or RETRY. First reply only; duplicates are ignored. Only RETRY repeats; no reply counts as DONE. Accepted replies are acknowledged.");
+                        "After a 20s lobby grace period, assigned Impostors have 30s to type DONE or RETRY. Only RETRY repeats; no reply counts as DONE. Accepted replies are acknowledged.");
 
                     bool drainUntilStop = PlayersTab::GetXpDrainUntilStopMode();
                     if (ImGui::Checkbox("Drain until someone types STOP", &drainUntilStop)) {
