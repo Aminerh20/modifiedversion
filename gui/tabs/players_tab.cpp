@@ -80,6 +80,7 @@ namespace PlayersTab {
     struct XpControllerChatMessage {
         std::string text;
         std::chrono::seconds delayAfterSend{0};
+        bool startsDrainFarmingPromptWindow = false;
     };
 
     struct XpLevelBaseline {
@@ -102,10 +103,12 @@ namespace PlayersTab {
         int drainRoundsTarget = 0;
         bool drainStopRequested = false;
         bool drainFarmingPromptResponse = false;
+        bool drainFarmingPromptResponseWindowStarted = false;
         bool hasDrainFarmingPromptPlayer = false;
         Game::PlayerId drainFarmingPromptPlayerId = 0;
         bool drainReturnAfterFarmingBreak = false;
         bool drainFarmingPromptGracePending = false;
+        bool farmingConfirmationPending = false;
         Game::PlayerId farmingRotationCursor = 0;
         bool hasFarmingRotationCursor = false;
         std::vector<Game::PlayerId> roundImpostorIds;
@@ -152,10 +155,12 @@ namespace PlayersTab {
     static bool xpDrainUntilStopMode = true;
     static bool xpDrainFarmingPromptMode = true;
     static bool xpDrainFarmingPromptResponse = false;
+    static bool xpDrainFarmingPromptResponseWindowStarted = false;
     static bool xpHasDrainFarmingPromptPlayer = false;
     static Game::PlayerId xpDrainFarmingPromptPlayerId = 0;
     static bool xpDrainReturnAfterFarmingBreak = false;
     static bool xpDrainFarmingPromptGracePending = false;
+    static bool xpFarmingConfirmationPending = false;
     static bool xpDrainStopRequested = false;
     static bool xpDrainRejoinGracePending = false;
     static bool xpDrainRejoinNoticePendingStart = false;
@@ -336,16 +341,17 @@ namespace PlayersTab {
         return sanitized.empty() ? "Player" : sanitized;
     }
 
-    static void QueueXpControllerChat(
+    static bool QueueXpControllerChat(
         const std::string& message,
-        std::chrono::seconds delayAfterSend = std::chrono::seconds::zero()) {
+        std::chrono::seconds delayAfterSend = std::chrono::seconds::zero(),
+        bool startsDrainFarmingPromptWindow = false) {
         if (!CanSendXpControllerChat()) {
             Toasts::AddToast("XP Controller", "Lobby chat is unavailable; status message was not sent.", ImVec4(1.f, 0.3f, 0.3f, 1.f));
-            return;
+            return false;
         }
 
         const std::string chatMessage = SanitizeXpControllerChatText(message);
-        if (chatMessage.empty()) return;
+        if (chatMessage.empty()) return false;
 
         if (xpPendingChatMessages.empty()) {
             xpRoundChatBatchStartedAt = std::chrono::steady_clock::now();
@@ -364,6 +370,7 @@ namespace PlayersTab {
             xpPendingChatMessages.push_back({
                 chatMessage.substr(start, end - start),
                 end == chatMessage.size() ? delayAfterSend : std::chrono::seconds::zero(),
+                end == chatMessage.size() && startsDrainFarmingPromptWindow,
             });
             ++queuedChunks;
             start = end;
@@ -371,6 +378,7 @@ namespace PlayersTab {
         }
         xpRoundChatMessageCount += queuedChunks;
         if (queuedChunks > 0) xpRoundChatPostDelaySeconds += delayAfterSend.count();
+        return queuedChunks > 0;
     }
 
     static void TickXpControllerChat() {
@@ -388,9 +396,7 @@ namespace PlayersTab {
             && State.ChatCooldown >= 3.f && CanSendXpControllerChat()) {
             State.rpcQueue.push(new RpcSendChat(
                 *Game::pLocalPlayer,
-                std::format(
-                    "Everyone done draining? Type STOP to farm again. Too early? Type CONTINUE.",
-                    xpDrainRoundsCompleted + 1)));
+                "Everyone done draining? Type STOP to farm again. Too early? Type CONTINUE."));
             State.MessageSent = true;
             xpDrainMeetingAnnouncementPending = false;
         }
@@ -409,6 +415,13 @@ namespace PlayersTab {
             queuedMessage.text.size(), queuedMessage.text));
         xpNextChatSendAt = now + xpChatSendInterval;
         xpPostChatDeadline = now + queuedMessage.delayAfterSend;
+        if (queuedMessage.startsDrainFarmingPromptWindow) {
+            xpDrainFarmingPromptResponseWindowStarted = true;
+            xpControllerDeadline = now + xpDrainFarmingPromptResponseDuration;
+            LogXpControllerEvent(std::format(
+                "ME response window started when its prompt was sent ({} seconds).",
+                xpDrainFarmingPromptResponseDuration.count()));
+        }
         if (xpPendingChatMessages.empty()) {
             xpRoundChatWait += std::chrono::duration_cast<std::chrono::milliseconds>(
                 now - xpRoundChatBatchStartedAt);
@@ -656,7 +669,9 @@ namespace PlayersTab {
         xpDrainRejoinGracePending = false;
         xpDrainRejoinNoticePendingStart = false;
         xpDrainMeetingAnnouncementPending = false;
+        xpFarmingConfirmationPending = false;
         xpDrainFarmingPromptResponse = false;
+        xpDrainFarmingPromptResponseWindowStarted = false;
         xpHasDrainFarmingPromptPlayer = false;
         xpDrainFarmingPromptPlayerId = 0;
         xpDrainReturnAfterFarmingBreak = false;
@@ -1215,6 +1230,8 @@ namespace PlayersTab {
     static void BeginXpFarmingRound() {
         if (!IsInLobby() || !IsHost()) return;
         if (!ConfigureMatchCycleTeams(true)) return;
+        xpFarmingConfirmationResponses.clear();
+        xpFarmingConfirmationPending = false;
         if (xpFarmingCycleAnnouncementPending) {
             std::vector<std::string> firstImpostorNames;
             for (const auto playerId : xpRoundImpostorIds) {
@@ -1285,8 +1302,8 @@ namespace PlayersTab {
             const bool isHost = IsMatchCycleHost(player);
             auto tracked = xpTrackedPlayers.find(playerId);
             const bool isImpostor = !isHost
-                && tracked != xpTrackedPlayers.end()
-                && tracked->second.was_impostor_this_round;
+                && std::find(xpRoundImpostorIds.begin(), xpRoundImpostorIds.end(), playerId)
+                    != xpRoundImpostorIds.end();
             PlayerControl_RpcSetRole(
                 player,
                 isImpostor ? RoleTypes__Enum::Impostor : RoleTypes__Enum::Crewmate,
@@ -1363,7 +1380,6 @@ namespace PlayersTab {
     }
 
     static void BeginXpFarmingConfirmationWindow() {
-        xpFarmingConfirmationResponses.clear();
         std::string assignedNames;
         std::string assignedDetails;
         for (size_t assignedIndex = 0; assignedIndex < xpRoundImpostorIds.size(); ++assignedIndex) {
@@ -1375,12 +1391,16 @@ namespace PlayersTab {
             if (!assignedDetails.empty()) assignedDetails += ", ";
             assignedDetails += std::format("{}='{}'", xpRoundImpostorIds[assignedIndex], name);
         }
-        QueueXpControllerChat(std::format(
+        const bool batchPromptQueued = QueueXpControllerChat(std::format(
             "Farming batch ({}): {}.",
             xpRoundImpostorIds.size(),
             assignedNames.empty() ? "none" : assignedNames));
-        QueueXpControllerChat(
+        const bool instructionPromptQueued = QueueXpControllerChat(
             "Type DONE or RETRY in 30s. DONE/no reply=DONE. RETRY=another turn.");
+        if (!batchPromptQueued || !instructionPromptQueued) {
+            StopXpController("Could not queue the farming confirmation prompt.");
+            return;
+        }
 
         xpControllerStage = XpControllerStage::FarmingConfirmations;
         xpControllerDeadline = (std::chrono::steady_clock::time_point::max)();
@@ -1390,14 +1410,16 @@ namespace PlayersTab {
     }
 
     static void ProcessXpFarmingConfirmations() {
+        xpFarmingConfirmationPending = false;
         size_t completedCount = 0;
         std::string resultSummary = "FARMING RESULT: ";
         for (const auto playerId : xpRoundImpostorIds) {
             const auto response = xpFarmingConfirmationResponses.find(playerId);
-            const bool completed = response == xpFarmingConfirmationResponses.end()
-                || response->second;
             auto tracked = xpTrackedPlayers.find(playerId);
             if (tracked == xpTrackedPlayers.end() || tracked->second.is_host) continue;
+            const bool completed = response == xpFarmingConfirmationResponses.end()
+                ? tracked->second.connected
+                : response->second;
             const size_t assignedIndex = static_cast<size_t>(std::distance(
                 xpRoundImpostorIds.begin(),
                 std::find(xpRoundImpostorIds.begin(), xpRoundImpostorIds.end(), playerId)));
@@ -1407,7 +1429,8 @@ namespace PlayersTab {
             if (resultSummary != "FARMING RESULT: ") resultSummary += ", ";
             resultSummary += std::format("{} {}", name,
                 response == xpFarmingConfirmationResponses.end()
-                    ? "DONE (no reply)" : (completed ? "DONE" : "RETRY"));
+                    ? (completed ? "DONE (no reply)" : "RETRY (disconnected)")
+                    : (completed ? "DONE" : "RETRY"));
             tracked->second.has_earned_xp = completed;
             tracked->second.has_completed_objective = completed;
             if (completed) xpFarmingCompletedPlayerIds.insert(playerId);
@@ -1418,7 +1441,7 @@ namespace PlayersTab {
         }
         QueueXpControllerChat(resultSummary + ".");
         LogXpControllerEvent(std::format(
-            "Farming confirmations closed: {} of {} assigned players completed; explicit RETRY remains eligible while DONE and no reply are complete.",
+            "Farming confirmations closed: {} of {} assigned players completed; connected no-reply assignments are credited and disconnected no-reply assignments remain eligible.",
             completedCount, xpRoundImpostorIds.size()));
         xpFarmingConfirmationResponses.clear();
         xpControllerPhase = XpControllerPhase::LOBBY_EVAL;
@@ -1439,17 +1462,25 @@ namespace PlayersTab {
 
     static void BeginXpDrainFarmingPrompt() {
         xpDrainFarmingPromptResponse = false;
+        xpDrainFarmingPromptResponseWindowStarted = false;
         xpHasDrainFarmingPromptPlayer = false;
         xpDrainFarmingPromptPlayerId = 0;
         xpControllerStage = XpControllerStage::DrainFarmingPrompt;
         xpControllerDeadline = (std::chrono::steady_clock::time_point::max)();
-        QueueXpControllerChat("Want one farming round? Type ME in 10s.");
+        if (!QueueXpControllerChat(
+            "Want one farming round? Type ME in 10s.",
+            std::chrono::seconds::zero(),
+            true)) {
+            StopXpController("Could not queue the drain farming prompt.");
+            return;
+        }
         LogXpControllerEvent(std::format(
-            "Opened 10-second ME prompt after drain round {}.",
+            "Queued 10-second ME prompt after drain round {}; timer will start when the prompt is sent.",
             xpDrainRoundsCompleted));
     }
 
     static void ProcessXpDrainFarmingPrompt() {
+        xpDrainFarmingPromptResponseWindowStarted = false;
         const auto requester = xpTrackedPlayers.find(xpDrainFarmingPromptPlayerId);
         const bool requesterStillConnected =
             xpDrainFarmingPromptResponse
@@ -1467,6 +1498,7 @@ namespace PlayersTab {
                 QueueXpControllerChat("No ME received. Continuing drain rounds.");
             }
             xpDrainFarmingPromptResponse = false;
+            xpDrainFarmingPromptResponseWindowStarted = false;
             xpHasDrainFarmingPromptPlayer = false;
             xpDrainFarmingPromptPlayerId = 0;
             xpControllerPhase = XpControllerPhase::ROLLOVER_LOOP;
@@ -1535,6 +1567,7 @@ namespace PlayersTab {
         }
         else {
             if (xpFarmingConfirmationMode) {
+                xpFarmingConfirmationPending = true;
                 LogXpControllerEvent(
                     "Farming match returned to lobby; allowing the 20-second lobby grace period before requesting confirmations.");
                 xpControllerStage = XpControllerStage::LobbyDelay;
@@ -1749,10 +1782,13 @@ namespace PlayersTab {
         xpControllerSnapshot.drainRoundsTarget = xpDrainRoundsTarget;
         xpControllerSnapshot.drainStopRequested = xpDrainStopRequested;
         xpControllerSnapshot.drainFarmingPromptResponse = xpDrainFarmingPromptResponse;
+        xpControllerSnapshot.drainFarmingPromptResponseWindowStarted =
+            xpDrainFarmingPromptResponseWindowStarted;
         xpControllerSnapshot.hasDrainFarmingPromptPlayer = xpHasDrainFarmingPromptPlayer;
         xpControllerSnapshot.drainFarmingPromptPlayerId = xpDrainFarmingPromptPlayerId;
         xpControllerSnapshot.drainReturnAfterFarmingBreak = xpDrainReturnAfterFarmingBreak;
         xpControllerSnapshot.drainFarmingPromptGracePending = xpDrainFarmingPromptGracePending;
+        xpControllerSnapshot.farmingConfirmationPending = xpFarmingConfirmationPending;
         xpControllerSnapshot.farmingRotationCursor = xpFarmingRotationCursor;
         xpControllerSnapshot.hasFarmingRotationCursor = xpHasFarmingRotationCursor;
         xpControllerSnapshot.roundImpostorIds = xpRoundImpostorIds;
@@ -1774,10 +1810,13 @@ namespace PlayersTab {
         xpDrainRoundsTarget = xpControllerSnapshot.drainRoundsTarget;
         xpDrainStopRequested = xpControllerSnapshot.drainStopRequested;
         xpDrainFarmingPromptResponse = xpControllerSnapshot.drainFarmingPromptResponse;
+        xpDrainFarmingPromptResponseWindowStarted =
+            xpControllerSnapshot.drainFarmingPromptResponseWindowStarted;
         xpHasDrainFarmingPromptPlayer = xpControllerSnapshot.hasDrainFarmingPromptPlayer;
         xpDrainFarmingPromptPlayerId = xpControllerSnapshot.drainFarmingPromptPlayerId;
         xpDrainReturnAfterFarmingBreak = xpControllerSnapshot.drainReturnAfterFarmingBreak;
         xpDrainFarmingPromptGracePending = xpControllerSnapshot.drainFarmingPromptGracePending;
+        xpFarmingConfirmationPending = xpControllerSnapshot.farmingConfirmationPending;
         xpFarmingRotationCursor = xpControllerSnapshot.farmingRotationCursor;
         xpHasFarmingRotationCursor = xpControllerSnapshot.hasFarmingRotationCursor;
         xpRoundImpostorIds = xpControllerSnapshot.roundImpostorIds;
@@ -1927,8 +1966,15 @@ namespace PlayersTab {
             return static_cast<char>(std::tolower(ch));
         });
 
-        if (xpControllerStage == XpControllerStage::FarmingConfirmations
-            && xpControllerPhase == XpControllerPhase::FARMING_ROUND
+        if (command == "done" || command == "retry" || command == "me"
+            || command == "stop" || command == "continue") {
+            LogXpControllerEvent(std::format(
+                "Chat command observed: playerId={}, command={}, phase={}, stage={}, inLobby={}, inMeeting={}.",
+                playerId, command, XpControllerPhaseName(xpControllerPhase),
+                XpControllerStageName(xpControllerStage), IsInLobby(), State.InMeeting));
+        }
+
+        if (xpControllerPhase == XpControllerPhase::FARMING_ROUND
             && IsInLobby()
             && (command == "done" || command == "retry")) {
             const auto tracked = xpTrackedPlayers.find(playerId);
@@ -1945,6 +1991,31 @@ namespace PlayersTab {
                 QueueXpControllerChat(std::format(
                     "{}: {} ignored; not assigned this batch.",
                     playerName, command == "done" ? "DONE" : "RETRY"));
+                return;
+            }
+
+            const bool confirmationStage =
+                xpControllerStage == XpControllerStage::LobbyDelay
+                || xpControllerStage == XpControllerStage::FarmingConfirmations;
+            if (!xpFarmingConfirmationPending || !confirmationStage) {
+                LogXpControllerEvent(std::format(
+                    "Farming confirmation not active: playerId={}, response={}, stage={}, assigned={}.",
+                    playerId, command, XpControllerStageName(xpControllerStage), assigned));
+                QueueXpControllerChat(std::format(
+                    "{}: wait for the farming confirmation prompt.",
+                    playerName));
+                return;
+            }
+
+            if (xpControllerStage == XpControllerStage::FarmingConfirmations
+                && xpControllerDeadline != (std::chrono::steady_clock::time_point::max)()
+                && std::chrono::steady_clock::now() >= xpControllerDeadline) {
+                LogXpControllerEvent(std::format(
+                    "Late farming confirmation ignored: playerId={}, response={}.",
+                    playerId, command));
+                QueueXpControllerChat(std::format(
+                    "{}: response window closed.",
+                    playerName));
                 return;
             }
 
@@ -1983,8 +2054,19 @@ namespace PlayersTab {
         if (xpControllerStage == XpControllerStage::DrainFarmingPrompt
             && xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP
             && IsInLobby()
-            && command == "me"
-            && !xpDrainFarmingPromptResponse) {
+            && command == "me") {
+            if (!xpDrainFarmingPromptResponseWindowStarted) {
+                QueueXpControllerChat("ME offer is not open yet.");
+                return;
+            }
+            if (std::chrono::steady_clock::now() >= xpControllerDeadline) {
+                QueueXpControllerChat("ME window closed. Continuing drain.");
+                return;
+            }
+            if (xpDrainFarmingPromptResponse) {
+                QueueXpControllerChat("ME already received.");
+                return;
+            }
             const auto tracked = xpTrackedPlayers.find(playerId);
             if (tracked == xpTrackedPlayers.end()
                 || tracked->second.is_host
@@ -2039,6 +2121,46 @@ namespace PlayersTab {
             && xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP
             && xpControllerStage == XpControllerStage::MatchTimer
             && State.InMeeting;
+    }
+
+    static void ReconcileXpRoundRolesAtStart() {
+        if (xpControllerPhase != XpControllerPhase::FARMING_ROUND) return;
+
+        std::vector<Game::PlayerId> actualImpostorIds;
+        size_t correctedRoleCount = 0;
+        for (auto player : GetConnectedXpPlayers()) {
+            const auto playerId = player->fields.PlayerId;
+            const bool expectedImpostor = std::find(
+                xpRoundImpostorIds.begin(), xpRoundImpostorIds.end(), playerId)
+                != xpRoundImpostorIds.end();
+            auto data = GetPlayerData(player);
+            if (data == nullptr) continue;
+
+            const bool actualImpostor = PlayerIsImpostor(data);
+            if (actualImpostor) actualImpostorIds.push_back(playerId);
+            if (actualImpostor != expectedImpostor) {
+                LogXpControllerEvent(std::format(
+                    "Correcting round role mismatch: playerId={}, expected={}, actual={}.",
+                    playerId,
+                    expectedImpostor ? "Impostor" : "Crewmate",
+                    actualImpostor ? "Impostor" : "Crewmate"));
+                PlayerControl_RpcSetRole(
+                    player,
+                    expectedImpostor ? RoleTypes__Enum::Impostor : RoleTypes__Enum::Crewmate,
+                    false,
+                    NULL);
+                ++correctedRoleCount;
+            }
+
+            auto tracked = xpTrackedPlayers.find(playerId);
+            if (tracked != xpTrackedPlayers.end()) {
+                tracked->second.is_impostor = expectedImpostor;
+            }
+        }
+
+        LogXpControllerEvent(std::format(
+            "Verified round role roster: expectedImpostorIds={}, observedImpostorIds={}, correctedRoles={}.",
+            xpRoundImpostorIds.size(), actualImpostorIds.size(), correctedRoleCount));
     }
 
     void StartXpController() {
@@ -2097,7 +2219,9 @@ namespace PlayersTab {
         xpDrainRejoinNoticePendingStart = false;
         xpDrainMeetingAnnouncementPending = false;
         xpPendingInGameChatMessages.clear();
+        xpFarmingConfirmationPending = false;
         xpDrainFarmingPromptResponse = false;
+        xpDrainFarmingPromptResponseWindowStarted = false;
         xpHasDrainFarmingPromptPlayer = false;
         xpDrainFarmingPromptPlayerId = 0;
         xpDrainReturnAfterFarmingBreak = false;
@@ -2150,6 +2274,15 @@ namespace PlayersTab {
         if (xpControllerStage == XpControllerStage::FarmingConfirmations
             && xpControllerDeadline == (std::chrono::steady_clock::time_point::max)()) {
             return "Sending farming confirmation prompt";
+        }
+        if (xpControllerStage == XpControllerStage::DrainFarmingPrompt) {
+            if (!xpDrainFarmingPromptResponseWindowStarted) {
+                return "Sending farming offer";
+            }
+            const auto responseSeconds = (std::max)(0LL,
+                std::chrono::duration_cast<std::chrono::seconds>(
+                    xpControllerDeadline - std::chrono::steady_clock::now()).count());
+            return std::format("Waiting for ME - {}s", responseSeconds);
         }
         if (xpHostAuthorityLostAt != std::chrono::steady_clock::time_point{}) {
             const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
@@ -2345,17 +2478,8 @@ namespace PlayersTab {
             }
             break;
         case XpControllerStage::DrainFarmingPrompt:
-            if (xpControllerDeadline == (std::chrono::steady_clock::time_point::max)()
-                && xpPendingChatMessages.empty() && now >= xpPostChatDeadline) {
-                xpRoundChatWait = std::chrono::milliseconds::zero();
-                xpRoundChatMessageCount = 0;
-                xpRoundChatPostDelaySeconds = 0;
-                xpControllerDeadline = now + xpDrainFarmingPromptResponseDuration;
-                LogXpControllerEvent(std::format(
-                    "ME prompt response window started ({} seconds).",
-                    xpDrainFarmingPromptResponseDuration.count()));
-            }
-            else if (now >= xpControllerDeadline) {
+            if (xpDrainFarmingPromptResponseWindowStarted
+                && now >= xpControllerDeadline) {
                 ProcessXpDrainFarmingPrompt();
             }
             break;
@@ -2405,6 +2529,7 @@ namespace PlayersTab {
         if (!IsXpControllerRunning() || !IsHost()
             || xpControllerStage != XpControllerStage::AwaitingMatch) return;
 
+        ReconcileXpRoundRolesAtStart();
         const int matchDurationSeconds = xpControllerPhase == XpControllerPhase::FARMING_ROUND
             ? xpFarmingDurationSeconds : static_cast<int>(xpRolloverDuration.count());
         const auto messageWait = xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP

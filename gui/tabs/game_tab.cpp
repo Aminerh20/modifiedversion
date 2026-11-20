@@ -95,27 +95,6 @@ namespace GameTab {
         };
 
         ImGui::BeginChild("###Game", ImVec2(500 * State.dpiScale, 0), true, ImGuiWindowFlags_NoBackground);
-        if (IsHost() && PlayersTab::IsXpControllerRunning()) {
-            ImGui::Separator();
-            ImGui::TextDisabled(
-                PlayersTab::IsXpControllerPaused() ? "Match Cycle (PAUSED)" : "Match Cycle (RUNNING)");
-            ImGui::SameLine();
-            if (PlayersTab::IsXpControllerPaused()) {
-                if (AnimatedButton("Resume Cycle")) {
-                    PlayersTab::ResumeXpController();
-                }
-            }
-            else if (AnimatedButton("Pause Cycle")) {
-                PlayersTab::PauseXpController();
-            }
-            if (AnimatedButton("Save Snapshot")) {
-                PlayersTab::SaveXpControllerSnapshot();
-            }
-            ImGui::SameLine();
-            if (AnimatedButton("Load Snapshot")) {
-                PlayersTab::LoadXpControllerSnapshot();
-            }
-        }
         if (openGeneral) {
             ImGui::Dummy(ImVec2(2, 2) * State.dpiScale);
             if (SteppedSliderFloat("Player Speed Multiplier", &State.PlayerSpeed, 0.f, 10.f, 0.05f, "%.2fx", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_NoInput)) {
@@ -238,20 +217,36 @@ namespace GameTab {
                 ImGui::Separator();
                 ImGui::Dummy(ImVec2(7, 7) * State.dpiScale);
 
+                if (PlayersTab::IsXpControllerRunning()) {
+                    if (PlayersTab::IsXpControllerPaused()) {
+                        if (AnimatedButton("Resume Match Cycle")) {
+                            PlayersTab::ResumeXpController();
+                        }
+                    }
+                    else if (AnimatedButton("Pause Match Cycle")) {
+                        PlayersTab::PauseXpController();
+                    }
+                    ImGui::SameLine();
+                    if (AnimatedButton("Save Snapshot")) {
+                        PlayersTab::SaveXpControllerSnapshot();
+                    }
+                    ImGui::SameLine();
+                    if (AnimatedButton("Load Snapshot")) {
+                        PlayersTab::LoadXpControllerSnapshot();
+                    }
+                }
+
                 int farmingDurationSeconds = PlayersTab::GetXpFarmingDurationSeconds();
                 ImGui::SetNextItemWidth(180 * State.dpiScale);
                 if (ImGui::InputInt("Farm round seconds", &farmingDurationSeconds)) {
                     PlayersTab::SetXpFarmingDurationSeconds(farmingDurationSeconds);
                 }
-                ImGui::TextDisabled("Applies to upcoming farming rounds (1-3600 seconds).");
 
                 int drainRoundsPerMinute = PlayersTab::GetXpDrainRoundsPerMinute();
                 ImGui::SetNextItemWidth(180 * State.dpiScale);
                 if (ImGui::InputInt("Drain rounds per farming minute", &drainRoundsPerMinute)) {
                     PlayersTab::SetXpDrainRoundsPerMinute(drainRoundsPerMinute);
                 }
-                const int drainRoundTarget =
-                    (PlayersTab::GetXpFarmingDurationSeconds() * PlayersTab::GetXpDrainRoundsPerMinute() + 59) / 60;
 
                 int drainBetweenRoundRejoinSeconds = PlayersTab::GetXpDrainBetweenRoundRejoinSeconds();
                 ImGui::SetNextItemWidth(180 * State.dpiScale);
@@ -278,8 +273,6 @@ namespace GameTab {
                         PlayersTab::ClearXpLevelRecorder();
                     }
                 }
-                ImGui::TextDisabled(
-                    "Flags a patch if, after a round, the level dropped below its highest observed value but is still at or above its recorded starting level.");
 
                 ImGui::Dummy(ImVec2(4, 4) * State.dpiScale);
                 const bool cycleRunning = PlayersTab::IsXpControllerRunning();
@@ -288,8 +281,6 @@ namespace GameTab {
                     if (ImGui::Checkbox("Require farming XP confirmation", &confirmFarming)) {
                         PlayersTab::SetXpFarmingConfirmationMode(confirmFarming);
                     }
-                    ImGui::TextDisabled(
-                        "After a 20s lobby grace period, assigned Impostors have 30s to type DONE or RETRY. Only RETRY repeats; no reply counts as DONE. Accepted replies are acknowledged.");
 
                     bool drainUntilStop = PlayersTab::GetXpDrainUntilStopMode();
                     if (ImGui::Checkbox("Drain until someone types STOP", &drainUntilStop)) {
@@ -300,27 +291,6 @@ namespace GameTab {
                         PlayersTab::SetXpDrainFarmingPromptMode(drainFarmingPrompt);
                     }
                 }
-                else {
-                    ImGui::TextDisabled(
-                        "Farming confirmation and drain mode settings cannot change while Match Cycle is running.");
-                }
-                if (PlayersTab::GetXpDrainUntilStopMode()) {
-                    ImGui::TextDisabled(
-                        "During each drain meeting: type STOP when everyone is done to stop draining and farm again. If STOP was too early, type CONTINUE to keep draining.");
-                }
-                else {
-                    ImGui::TextDisabled(
-                        "Drain starts 30s after its notice, runs %d 35s rounds without protection, and waits %ds between rounds.",
-                        drainRoundTarget, PlayersTab::GetXpDrainBetweenRoundRejoinSeconds());
-                }
-                if (PlayersTab::GetXpDrainFarmingPromptMode()) {
-                    ImGui::TextDisabled(
-                        "After each non-final drain round: wait 20s in the lobby, then allow 10s for ME. Drain matches still run their full 35s from match start.");
-                }
-                ImGui::TextDisabled(
-                    "When draining ends, the cycle waits 10s for the lobby to settle, announces the end and rejoin time, then waits the full %ds before farming restarts.",
-                    PlayersTab::GetXpFinalRejoinWindowSeconds());
-
                 if (!PlayersTab::IsXpControllerRunning()) {
                     if (AnimatedButton("Start Match Cycle")) {
                         PlayersTab::StartXpController();
@@ -330,17 +300,7 @@ namespace GameTab {
                     if (ColoredButton(ImVec4(1.f, 0.f, 0.f, 1.f), "Stop Match Cycle")) {
                         PlayersTab::StopXpController();
                     }
-                    const std::string status = PlayersTab::GetXpControllerStatus();
-                    ImGui::TextWrapped("%s", status.c_str());
                 }
-                ImGui::TextDisabled("Host is excluded from farming and progression tracking. Drain rounds are timed; XP rollover is not detected automatically.");
-                ImGui::TextDisabled("Farming starts 10s after its notice; auto-drain starts 30s after its notice.");
-                if (!PlayersTab::GetXpDrainUntilStopMode()) {
-                    ImGui::TextDisabled("Next auto-drain target: %d rounds.", drainRoundTarget);
-                }
-                ImGui::TextDisabled("Disable Auto Fake Role, Battle Royale, Task Speedrun, End Game V2, and non-standard game modes first. Match Cycle blocks unscheduled game endings and permits its scheduled round ends.");
-                ImGui::TextDisabled("Auto-start, timed end, task/level auto-kicks pause during the cycle. Match Cycle controls role assignment.");
-                ImGui::TextDisabled("Cycle diagnostics: SickoMenu/sicko-log.txt");
             }
 
             // Drain XP - host-only automation that force-starts the game and ends it right
