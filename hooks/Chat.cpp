@@ -7,6 +7,7 @@
 #include "toasts.hpp"
 #include "console.hpp"
 #include "../gui/UiUpdateQueue.hpp"
+#include "../gui/tabs/players_tab.h"
 #include <regex>
 
 static float copyNotificationTimer = 0.f;
@@ -1068,6 +1069,11 @@ void dPlayerControl_RpcSendChat(PlayerControl* __this, String* chatText, MethodI
 
 void dChatBubble_SetText(ChatBubble* __this, String* chatText, MethodInfo* method) {
 	if (State.ShowHookLogs) Log.HookDebug("Hook dChatBubble_SetText executed", false);
+	if (__this != nullptr && __this->fields.playerInfo != nullptr && chatText != nullptr) {
+		PlayersTab::OnXpControllerChatMessage(
+			__this->fields.playerInfo->fields.PlayerId,
+			convert_from_string(chatText));
+	}
 	if ((!State.PanicMode || State.TempPanicMode)) {
 		// std::string colorOpener = "", colorCloser = "";
 		SpriteRenderer_set_color(__this->fields.MaskArea, Palette__TypeInfo->static_fields->ClearWhite, NULL);

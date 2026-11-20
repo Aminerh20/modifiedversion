@@ -49,8 +49,14 @@ namespace PlayersTab {
 	void SetXpDrainBetweenRoundRejoinSeconds(int seconds);
 	int GetXpFinalRejoinWindowSeconds();
 	void SetXpFinalRejoinWindowSeconds(int seconds);
+	bool GetXpFarmingConfirmationMode();
+	void SetXpFarmingConfirmationMode(bool enabled);
+	bool GetXpDrainUntilStopMode();
+	void SetXpDrainUntilStopMode(bool enabled);
 	void TickXpController();
 	void OnXpControllerGameStarted();
+	void OnXpControllerChatMessage(Game::PlayerId playerId, const std::string& message);
+	bool ShouldHoldXpDrainMeeting();
 	std::string GetXpControllerStatus();
 	void TickKillLoop();
 	void StopKillLoop();

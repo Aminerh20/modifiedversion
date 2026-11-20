@@ -6,6 +6,7 @@
 #include "gui-helpers.hpp"
 #include "_hooks.h"
 #include "sabotage_tab.h"
+#include "players_tab.h"
 
 bool editingAutoStartPlayerCount = false;
 
@@ -576,7 +577,10 @@ namespace HostTab {
                 }
 
                 if (State.CurrentScene.compare("Tutorial") || IsInLobby()) { //lobby isn't possible in freeplay
-                    if (ToggleButton("Disable Game Ending", &State.NoGameEnd)) {
+                    if (PlayersTab::IsXpControllerRunning()) {
+                        ImGui::TextDisabled("Disable Game Ending (managed by Match Cycle)");
+                    }
+                    else if (ToggleButton("Disable Game Ending", &State.NoGameEnd)) {
                         State.Save();
                     }
 

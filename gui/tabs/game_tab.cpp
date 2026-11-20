@@ -243,11 +243,35 @@ namespace GameTab {
                 if (ImGui::InputInt("Rejoin wait after drain (seconds)", &finalRejoinWindowSeconds)) {
                     PlayersTab::SetXpFinalRejoinWindowSeconds(finalRejoinWindowSeconds);
                 }
+                const bool cycleRunning = PlayersTab::IsXpControllerRunning();
+                if (!cycleRunning) {
+                    bool confirmFarming = PlayersTab::GetXpFarmingConfirmationMode();
+                    if (ImGui::Checkbox("Require farming XP confirmation", &confirmFarming)) {
+                        PlayersTab::SetXpFarmingConfirmationMode(confirmFarming);
+                    }
+                    ImGui::TextDisabled(
+                        "Assigned Impostors have 30s to type DONE or RETRY. Only DONE completes farming; no reply retries. Off keeps automatic credit.");
+
+                    bool drainUntilStop = PlayersTab::GetXpDrainUntilStopMode();
+                    if (ImGui::Checkbox("Drain until someone types STOP", &drainUntilStop)) {
+                        PlayersTab::SetXpDrainUntilStopMode(drainUntilStop);
+                    }
+                }
+                else {
+                    ImGui::TextDisabled(
+                        "Farming confirmation and drain mode settings cannot change while Match Cycle is running.");
+                }
+                if (PlayersTab::GetXpDrainUntilStopMode()) {
+                    ImGui::TextDisabled(
+                        "Each 35s drain round starts a meeting that stays open despite votes. Type STOP only when everyone is done; it takes effect after the current round.");
+                }
+                else {
+                    ImGui::TextDisabled(
+                        "Drain starts 30s after its notice, runs %d 35s rounds without protection, and waits %ds between rounds.",
+                        drainRoundTarget, PlayersTab::GetXpDrainBetweenRoundRejoinSeconds());
+                }
                 ImGui::TextDisabled(
-                    "Drain starts 30s after its notice, runs %d 35s rounds without protection, and waits %ds between rounds.",
-                    drainRoundTarget, PlayersTab::GetXpDrainBetweenRoundRejoinSeconds());
-                ImGui::TextDisabled(
-                    "After the final drain round, the cycle asks players to rejoin and waits up to %ds before farming restarts.",
+                    "When draining ends, the cycle asks players to rejoin and waits up to %ds before farming restarts.",
                     PlayersTab::GetXpFinalRejoinWindowSeconds());
 
                 if (!PlayersTab::IsXpControllerRunning()) {
@@ -262,10 +286,12 @@ namespace GameTab {
                     const std::string status = PlayersTab::GetXpControllerStatus();
                     ImGui::TextWrapped("%s", status.c_str());
                 }
-                ImGui::TextDisabled("Host is excluded. Each assigned Impostor counts after their round returns to the lobby; drain uses a fixed round count, not level checks.");
+                ImGui::TextDisabled("Host is excluded from farming and progression tracking. Drain rounds are timed; XP rollover is not detected automatically.");
                 ImGui::TextDisabled("Farming starts 10s after its notice; auto-drain starts 30s after its notice.");
-                ImGui::TextDisabled("Next auto-drain target: %d rounds.", drainRoundTarget);
-                ImGui::TextDisabled("Disable Auto Fake Role, Battle Royale, Task Speedrun, End Game V2, No Game End, and non-standard game modes first.");
+                if (!PlayersTab::GetXpDrainUntilStopMode()) {
+                    ImGui::TextDisabled("Next auto-drain target: %d rounds.", drainRoundTarget);
+                }
+                ImGui::TextDisabled("Disable Auto Fake Role, Battle Royale, Task Speedrun, End Game V2, and non-standard game modes first. Match Cycle blocks unscheduled game endings and permits its scheduled round ends.");
                 ImGui::TextDisabled("Auto-start, timed end, task/level auto-kicks pause during the cycle. Match Cycle controls role assignment.");
                 ImGui::TextDisabled("Cycle diagnostics: SickoMenu/sicko-log.txt");
             }

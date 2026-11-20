@@ -528,6 +528,7 @@ void dMeetingHud_Update(MeetingHud* __this, MethodInfo* method) {
 void dMeetingHud_CheckForEndVoting(MeetingHud* __this, MethodInfo* method) {
     if (State.ShowHookLogs) Log.HookDebug("Hook dMeetingHud_CheckForEndVoting executed", false);
     if (State.PanicMode) return MeetingHud_CheckForEndVoting(__this, method);
+    if (PlayersTab::ShouldHoldXpDrainMeeting()) return;
 
     il2cpp::Array playerStates(__this->fields.playerStates);
 
