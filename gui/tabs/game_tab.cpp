@@ -250,7 +250,7 @@ namespace GameTab {
                         PlayersTab::SetXpFarmingConfirmationMode(confirmFarming);
                     }
                     ImGui::TextDisabled(
-                        "After a 20s lobby grace period, assigned Impostors have 30s to type DONE or RETRY. Only RETRY repeats; no reply counts as DONE. Off keeps automatic credit.");
+                        "After a 20s lobby grace period, assigned Impostors have 30s to type DONE or RETRY. First reply only; duplicates are ignored. Only RETRY repeats; no reply counts as DONE. Accepted replies are acknowledged.");
 
                     bool drainUntilStop = PlayersTab::GetXpDrainUntilStopMode();
                     if (ImGui::Checkbox("Drain until someone types STOP", &drainUntilStop)) {
@@ -263,7 +263,7 @@ namespace GameTab {
                 }
                 if (PlayersTab::GetXpDrainUntilStopMode()) {
                     ImGui::TextDisabled(
-                        "Each 35s drain round starts a meeting that stays open despite votes. Type STOP only when everyone is done; it takes effect after the current round.");
+                        "Each 35s drain round starts a meeting that stays open despite votes. STOP ends draining after this round; type CONTINUE during the meeting to cancel a pending STOP. Accepted commands are acknowledged once.");
                 }
                 else {
                     ImGui::TextDisabled(
@@ -271,7 +271,7 @@ namespace GameTab {
                         drainRoundTarget, PlayersTab::GetXpDrainBetweenRoundRejoinSeconds());
                 }
                 ImGui::TextDisabled(
-                    "When draining ends, the cycle asks players to rejoin and waits the full %ds before farming restarts, even if everyone reconnects early.",
+                    "When draining ends, the cycle waits 10s for the lobby to settle, announces the end and rejoin time, then waits the full %ds before farming restarts.",
                     PlayersTab::GetXpFinalRejoinWindowSeconds());
 
                 if (!PlayersTab::IsXpControllerRunning()) {
