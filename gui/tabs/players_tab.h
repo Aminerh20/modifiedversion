@@ -49,6 +49,8 @@ namespace PlayersTab {
 	void SetXpDrainBetweenRoundRejoinSeconds(int seconds);
 	int GetXpFinalRejoinWindowSeconds();
 	void SetXpFinalRejoinWindowSeconds(int seconds);
+	int GetXpProgressMode();
+	void SetXpProgressMode(int mode);
 	bool GetXpFarmingConfirmationMode();
 	void SetXpFarmingConfirmationMode(bool enabled);
 	bool GetXpDrainUntilStopMode();

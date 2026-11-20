@@ -92,6 +92,12 @@ namespace PlayersTab {
         std::string name;
     };
 
+    enum class XpProgressMode {
+        LevelTracking = 0,
+        LevelWithChatFallback = 1,
+        LegacyChat = 2,
+    };
+
     struct XpControllerSnapshot {
         XpControllerPhase phase = XpControllerPhase::STOPPED;
         XpControllerStage stage = XpControllerStage::PreparingRound;
@@ -99,6 +105,7 @@ namespace PlayersTab {
         bool deadlineIsMax = false;
         int64_t deadlineRemainingMs = 0;
         int64_t transitionRemainingMs = 0;
+        int progressMode = static_cast<int>(XpProgressMode::LevelTracking);
         int drainRoundsCompleted = 0;
         int drainRoundsTarget = 0;
         bool drainStopRequested = false;
@@ -116,6 +123,8 @@ namespace PlayersTab {
         std::unordered_set<Game::PlayerId> completedPlayerIds;
         std::unordered_set<Game::PlayerId> retryPlayerIds;
         std::unordered_map<Game::PlayerId, bool> confirmationResponses;
+        std::unordered_map<Game::PlayerId, uint32_t> roundLevelBaselines;
+        bool roundShieldFailure = false;
     };
 
     static XpControllerPhase xpControllerPhase = XpControllerPhase::STOPPED;
@@ -153,6 +162,9 @@ namespace PlayersTab {
     static bool xpControllerOwnsNoGameEnd = false;
     static bool xpFarmingConfirmationMode = true;
     static bool xpDrainUntilStopMode = true;
+    static XpProgressMode xpProgressMode = XpProgressMode::LevelTracking;
+    static std::unordered_map<Game::PlayerId, uint32_t> xpRoundLevelBaselines;
+    static bool xpRoundShieldFailure = false;
     static bool xpDrainFarmingPromptMode = true;
     static bool xpDrainFarmingPromptResponse = false;
     static bool xpDrainFarmingPromptResponseWindowStarted = false;
@@ -394,9 +406,12 @@ namespace PlayersTab {
         }
         if (xpDrainMeetingAnnouncementPending && IsInGame() && State.InMeeting
             && State.ChatCooldown >= 3.f && CanSendXpControllerChat()) {
-            State.rpcQueue.push(new RpcSendChat(
-                *Game::pLocalPlayer,
-                "Everyone done draining? Type STOP to farm again. Too early? Type CONTINUE."));
+            const std::string meetingText =
+                xpProgressMode == XpProgressMode::LegacyChat
+                ? "Everyone done draining? Type STOP to farm again. Too early? Type CONTINUE."
+                : std::format("Drain round {}. Meeting stays open while levels are tracked.",
+                    xpDrainRoundsCompleted + 1);
+            State.rpcQueue.push(new RpcSendChat(*Game::pLocalPlayer, meetingText));
             State.MessageSent = true;
             xpDrainMeetingAnnouncementPending = false;
         }
@@ -1152,6 +1167,89 @@ namespace PlayersTab {
         return true;
     }
 
+    static uint32_t GetXpObservedLevel(Game::PlayerId playerId) {
+        auto player = GetPlayerControlById(playerId);
+        if (player == nullptr) return 0;
+        auto data = GetPlayerData(player);
+        if (data == nullptr) return 0;
+        return data->fields.PlayerLevel + 1;
+    }
+
+    static void CaptureXpRoundLevelBaselines(bool farmingRound) {
+        xpRoundLevelBaselines.clear();
+        std::vector<Game::PlayerId> captureIds;
+        if (farmingRound) {
+            captureIds = xpRoundImpostorIds;
+        }
+        else {
+            for (const auto& [playerId, tracked] : xpTrackedPlayers) {
+                if (!tracked.is_host) captureIds.push_back(playerId);
+            }
+        }
+
+        for (const auto playerId : captureIds) {
+            const uint32_t level = GetXpObservedLevel(playerId);
+            if (level != 0) xpRoundLevelBaselines[playerId] = level;
+        }
+    }
+
+    static bool EvaluateXpLevelFarmingRound() {
+        size_t completedCount = 0;
+        std::string resultSummary = "FARMING LEVEL RESULT: ";
+        for (const auto playerId : xpRoundImpostorIds) {
+            auto tracked = xpTrackedPlayers.find(playerId);
+            if (tracked == xpTrackedPlayers.end() || tracked->second.is_host) continue;
+
+            const uint32_t currentLevel = GetXpObservedLevel(playerId);
+            const auto baseline = xpRoundLevelBaselines.find(playerId);
+            const bool leveledUp = baseline != xpRoundLevelBaselines.end()
+                && baseline->second != 0
+                && currentLevel >= baseline->second + 1;
+
+            tracked->second.has_earned_xp = leveledUp;
+            tracked->second.has_completed_objective = leveledUp;
+            tracked->second.farmed_this_round = leveledUp;
+            if (leveledUp) {
+                xpFarmingCompletedPlayerIds.insert(playerId);
+                xpFarmingRetryPlayerIds.erase(playerId);
+                ++completedCount;
+            }
+            else {
+                xpFarmingCompletedPlayerIds.erase(playerId);
+                xpFarmingRetryPlayerIds.insert(playerId);
+            }
+
+            if (resultSummary != "FARMING LEVEL RESULT: ") resultSummary += ", ";
+            resultSummary += std::format("{} {}",
+                XpControllerChatName(tracked->second.name),
+                leveledUp ? "leveled up" : "retry");
+            LogXpControllerEvent(std::format(
+                "Farming level result: playerId={}, name='{}', baseline={}, current={}, leveledUp={}.",
+                playerId, tracked->second.name,
+                baseline == xpRoundLevelBaselines.end() ? 0 : baseline->second,
+                currentLevel, leveledUp));
+        }
+        QueueXpControllerChat(resultSummary + ".");
+        return completedCount == xpRoundImpostorIds.size();
+    }
+
+    static bool EvaluateXpLevelDrainRound() {
+        size_t activeCount = 0;
+        size_t leveledCount = 0;
+        for (const auto& [playerId, tracked] : xpTrackedPlayers) {
+            if (tracked.is_host) continue;
+            const auto baseline = xpRoundLevelBaselines.find(playerId);
+            if (baseline == xpRoundLevelBaselines.end()) continue;
+            const uint32_t currentLevel = GetXpObservedLevel(playerId);
+            ++activeCount;
+            if (currentLevel >= baseline->second + 1) ++leveledCount;
+        }
+        LogXpControllerEvent(std::format(
+            "Drain level result: round={}, active={}, leveledUp={}.",
+            xpDrainRoundsCompleted + 1, activeCount, leveledCount));
+        return activeCount > 0 && leveledCount == activeCount;
+    }
+
     static void ReconcileMatchCycleShields() {
         if (!IsXpControllerRunning() || !IsHost()
             || xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP) return;
@@ -1172,6 +1270,15 @@ namespace PlayersTab {
 
         std::vector<Game::PlayerId> desiredShields;
         const auto desiredCount = (std::min)(static_cast<size_t>((std::max)(teamCap, 0)), eligibleDefenders.size());
+        if (xpControllerPhase == XpControllerPhase::FARMING_ROUND
+            && xpProgressMode != XpProgressMode::LegacyChat
+            && teamCap > 0
+            && desiredCount < static_cast<size_t>(teamCap)) {
+            xpRoundShieldFailure = true;
+            LogXpControllerEvent(std::format(
+                "Round shield failure: required={}, availableReplacementTargets={}.",
+                teamCap, desiredCount));
+        }
         for (auto player : eligibleDefenders) {
             if (desiredShields.size() == desiredCount) break;
             desiredShields.push_back(player->fields.PlayerId);
@@ -1230,6 +1337,10 @@ namespace PlayersTab {
     static void BeginXpFarmingRound() {
         if (!IsInLobby() || !IsHost()) return;
         if (!ConfigureMatchCycleTeams(true)) return;
+        xpRoundShieldFailure = false;
+        if (xpProgressMode != XpProgressMode::LegacyChat) {
+            CaptureXpRoundLevelBaselines(true);
+        }
         xpFarmingConfirmationResponses.clear();
         xpFarmingConfirmationPending = false;
         if (xpFarmingCycleAnnouncementPending) {
@@ -1264,6 +1375,10 @@ namespace PlayersTab {
     static void BeginXpRolloverRound() {
         if (!IsInLobby() || !IsHost()) return;
         if (!ConfigureMatchCycleTeams(false)) return;
+        xpRoundShieldFailure = false;
+        if (xpProgressMode != XpProgressMode::LegacyChat) {
+            CaptureXpRoundLevelBaselines(false);
+        }
         xpControllerPhase = XpControllerPhase::ROLLOVER_LOOP;
         xpDrainMeetingAnnouncementPending = false;
         xpControllerStage = XpControllerStage::PreparingRound;
@@ -1527,6 +1642,42 @@ namespace PlayersTab {
         CheckXpLevelPatchAfterRound();
         if (xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP) {
             ++xpDrainRoundsCompleted;
+            if (xpProgressMode != XpProgressMode::LegacyChat) {
+                if (xpRoundShieldFailure) {
+                    xpRoundShieldFailure = false;
+                    xpDrainRejoinGracePending = true;
+                    xpControllerStage = XpControllerStage::LobbyDelay;
+                    xpControllerDeadline = std::chrono::steady_clock::now()
+                        + transitionGraceDuration;
+                    QueueXpControllerChat(
+                        "Drain round failed: no replacement shield target. Retrying after rejoin.");
+                    LogXpControllerEvent(
+                        "Level-mode drain round failed because no replacement shield target remained.");
+                    return;
+                }
+
+                const bool allLeveledUp = EvaluateXpLevelDrainRound();
+                if (!allLeveledUp) {
+                    xpDrainRejoinGracePending = true;
+                    xpControllerStage = XpControllerStage::LobbyDelay;
+                    xpControllerDeadline = std::chrono::steady_clock::now()
+                        + transitionGraceDuration;
+                    LogXpControllerEvent(
+                        "Level-mode drain levels stopped increasing; entering rejoin grace.");
+                    return;
+                }
+
+                xpControllerStage = XpControllerStage::LobbyDelay;
+                xpControllerDeadline = std::chrono::steady_clock::now()
+                    + std::chrono::seconds(xpDrainBetweenRoundRejoinSeconds);
+                QueueXpControllerChat(std::format(
+                    "Drain round {} complete. Levels increased.",
+                    xpDrainRoundsCompleted));
+                LogXpControllerEvent(std::format(
+                    "Level-mode drain round {} successful; waiting {}s and continuing.",
+                    xpDrainRoundsCompleted, xpDrainBetweenRoundRejoinSeconds));
+                return;
+            }
             LogXpControllerEvent(std::format(
                 "Completed drain round {}/{} ({} configured rounds per farming minute).",
                 xpDrainRoundsCompleted, xpDrainRoundsTarget, xpDrainRoundsPerMinute));
@@ -1566,6 +1717,35 @@ namespace PlayersTab {
                 xpDrainRoundsTarget));
         }
         else {
+            if (xpProgressMode != XpProgressMode::LegacyChat) {
+                bool levelEvidenceAvailable = true;
+                for (const auto playerId : xpRoundImpostorIds) {
+                    const auto baseline = xpRoundLevelBaselines.find(playerId);
+                    if (baseline == xpRoundLevelBaselines.end()
+                        || GetXpObservedLevel(playerId) == 0) {
+                        levelEvidenceAvailable = false;
+                        break;
+                    }
+                }
+                if (xpProgressMode == XpProgressMode::LevelWithChatFallback
+                    && !levelEvidenceAvailable) {
+                    xpFarmingConfirmationPending = true;
+                    xpControllerStage = XpControllerStage::LobbyDelay;
+                    xpControllerDeadline = std::chrono::steady_clock::now()
+                        + xpFarmingLobbyGraceDuration;
+                    LogXpControllerEvent(
+                        "Farming level evidence unavailable; activating legacy chat confirmation fallback.");
+                    return;
+                }
+
+                EvaluateXpLevelFarmingRound();
+                xpControllerStage = XpControllerStage::LobbyDelay;
+                xpControllerDeadline = std::chrono::steady_clock::now()
+                    + xpFarmingLobbyGraceDuration;
+                LogXpControllerEvent(
+                    "Farming round evaluated from level baselines; no DONE/RETRY prompt in level mode.");
+                return;
+            }
             if (xpFarmingConfirmationMode) {
                 xpFarmingConfirmationPending = true;
                 LogXpControllerEvent(
@@ -1636,6 +1816,14 @@ namespace PlayersTab {
         SynchronizeXpPlayers();
 
         if (xpControllerPhase == XpControllerPhase::FARMING_ROUND) {
+            if (xpProgressMode != XpProgressMode::LegacyChat
+                && !xpFarmingConfirmationPending) {
+                xpControllerPhase = XpControllerPhase::LOBBY_EVAL;
+                xpControllerStage = XpControllerStage::EvaluateLobby;
+                LogXpControllerEvent(
+                    "Level-mode farming lobby delay complete; evaluating completed players.");
+                return;
+            }
             if (xpFarmingConfirmationMode) {
                 BeginXpFarmingConfirmationWindow();
                 return;
@@ -1702,6 +1890,23 @@ namespace PlayersTab {
         return xpFinalRejoinWindowSeconds;
     }
 
+    int GetXpProgressMode() {
+        return static_cast<int>(xpProgressMode);
+    }
+
+    void SetXpProgressMode(int mode) {
+        xpProgressMode = static_cast<XpProgressMode>((std::clamp)(mode, 0, 2));
+        xpDrainUntilStopMode = xpProgressMode == XpProgressMode::LegacyChat;
+        xpFarmingConfirmationMode =
+            xpProgressMode == XpProgressMode::LegacyChat
+            || xpProgressMode == XpProgressMode::LevelWithChatFallback;
+        LogXpControllerEvent(std::format(
+            "XP progress mode changed to {}.",
+            xpProgressMode == XpProgressMode::LevelTracking ? "LevelTracking"
+            : xpProgressMode == XpProgressMode::LevelWithChatFallback ? "LevelWithChatFallback"
+            : "LegacyChat"));
+    }
+
     void SetXpFinalRejoinWindowSeconds(int seconds) {
         xpFinalRejoinWindowSeconds = (std::clamp)(seconds, 1, 3600);
     }
@@ -1765,6 +1970,7 @@ namespace PlayersTab {
         xpControllerSnapshot.valid = IsXpControllerRunning();
         xpControllerSnapshot.phase = xpControllerPhase;
         xpControllerSnapshot.stage = xpControllerStage;
+        xpControllerSnapshot.progressMode = static_cast<int>(xpProgressMode);
         xpControllerSnapshot.deadlineIsMax =
             xpControllerDeadline == (std::chrono::steady_clock::time_point::max)();
         xpControllerSnapshot.deadlineRemainingMs = xpControllerSnapshot.deadlineIsMax
@@ -1796,6 +2002,8 @@ namespace PlayersTab {
         xpControllerSnapshot.completedPlayerIds = xpFarmingCompletedPlayerIds;
         xpControllerSnapshot.retryPlayerIds = xpFarmingRetryPlayerIds;
         xpControllerSnapshot.confirmationResponses = xpFarmingConfirmationResponses;
+        xpControllerSnapshot.roundLevelBaselines = xpRoundLevelBaselines;
+        xpControllerSnapshot.roundShieldFailure = xpRoundShieldFailure;
         NotifyXpController(
             "Match Cycle snapshot saved",
             "Pause and restore this exact controller state.",
@@ -1806,6 +2014,7 @@ namespace PlayersTab {
         if (!xpControllerSnapshot.valid) return false;
         xpControllerPhase = xpControllerSnapshot.phase;
         xpControllerStage = xpControllerSnapshot.stage;
+        SetXpProgressMode(xpControllerSnapshot.progressMode);
         xpDrainRoundsCompleted = xpControllerSnapshot.drainRoundsCompleted;
         xpDrainRoundsTarget = xpControllerSnapshot.drainRoundsTarget;
         xpDrainStopRequested = xpControllerSnapshot.drainStopRequested;
@@ -1824,6 +2033,8 @@ namespace PlayersTab {
         xpFarmingCompletedPlayerIds = xpControllerSnapshot.completedPlayerIds;
         xpFarmingRetryPlayerIds = xpControllerSnapshot.retryPlayerIds;
         xpFarmingConfirmationResponses = xpControllerSnapshot.confirmationResponses;
+        xpRoundLevelBaselines = xpControllerSnapshot.roundLevelBaselines;
+        xpRoundShieldFailure = xpControllerSnapshot.roundShieldFailure;
         const auto now = std::chrono::steady_clock::now();
         xpControllerDeadline = xpControllerSnapshot.deadlineIsMax
             ? (std::chrono::steady_clock::time_point::max)()
@@ -2299,7 +2510,9 @@ namespace PlayersTab {
         case XpControllerPhase::FARMING_ROUND: phaseName = "Farming round"; break;
         case XpControllerPhase::LOBBY_EVAL: phaseName = "Reporting completed farming turns"; break;
         case XpControllerPhase::ROLLOVER_LOOP:
-            phaseName = xpDrainUntilStopMode ? "Drain sequence" : "Fixed drain sequence";
+            phaseName = xpProgressMode == XpProgressMode::LegacyChat
+                ? (xpDrainUntilStopMode ? "Drain sequence" : "Fixed drain sequence")
+                : "Level drain sequence";
             break;
         case XpControllerPhase::STOPPED: break;
         }
@@ -2318,6 +2531,11 @@ namespace PlayersTab {
         if (xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP) {
             if (xpControllerStage == XpControllerStage::AwaitingRejoin) {
                 return std::format("Drain rounds complete - rejoin window - {}s{}", remaining, rosterStatus);
+            }
+            if (xpProgressMode != XpProgressMode::LegacyChat) {
+                return std::format(
+                    "{} - round {} (level-based) - {}s{}",
+                    phaseName, xpDrainRoundsCompleted + 1, remaining, rosterStatus);
             }
             if (xpDrainUntilStopMode) {
                 return std::format(
@@ -2429,6 +2647,11 @@ namespace PlayersTab {
             if (IsInLobby()) {
                 HandleXpRoundReturnedToLobby();
             }
+            else if (xpRoundShieldFailure) {
+                LogXpControllerEvent(
+                    "Shield failure detected; force-ending round early.");
+                ForceEndXpMatch();
+            }
             else if (now >= xpControllerDeadline) {
                 ForceEndXpMatch();
             }
@@ -2493,7 +2716,14 @@ namespace PlayersTab {
                 xpDrainRoundsCompleted = 0;
                 xpDrainRoundsTarget = GetXpDrainRoundsTarget();
                 xpControllerPhase = XpControllerPhase::ROLLOVER_LOOP;
-                if (xpDrainUntilStopMode) {
+                if (xpProgressMode != XpProgressMode::LegacyChat) {
+                    QueueXpControllerChat(
+                        "Level draining starts. Rounds continue until level gains stop.",
+                        std::chrono::seconds::zero());
+                    LogXpControllerEvent(
+                        "Level-based draining started with no fixed round limit.");
+                }
+                else if (xpDrainUntilStopMode) {
                     QueueXpControllerChat(
                         "Draining starts in 30s. Type STOP when everyone is done; type CONTINUE if STOP was too early.",
                         std::chrono::seconds::zero());
@@ -2504,17 +2734,28 @@ namespace PlayersTab {
                         xpDrainRoundsTarget, xpDrainBetweenRoundRejoinSeconds),
                         std::chrono::seconds::zero());
                 }
-                LogXpControllerEvent(std::format(
-                    "All connected non-host participants completed farming; beginning {} drain mode (target={} rounds, {} per farming minute, farmingDuration={}s). {}",
-                    xpDrainUntilStopMode ? "STOP-controlled" : "fixed-count",
-                    xpDrainRoundsTarget, xpDrainRoundsPerMinute, xpFarmingDurationSeconds,
-                    BuildXpControllerDiagnostics()));
-                NotifyXpController(
-                    "Auto-drain starting",
-                    xpDrainUntilStopMode
-                        ? "Until STOP is requested; protection off."
-                        : std::format("{} rounds; protection off.", xpDrainRoundsTarget),
-                    ImVec4(1.f, 0.7f, 0.2f, 1.f));
+                if (xpProgressMode == XpProgressMode::LegacyChat) {
+                    LogXpControllerEvent(std::format(
+                        "All connected non-host participants completed farming; beginning {} drain mode (target={} rounds, {} per farming minute, farmingDuration={}s). {}",
+                        xpDrainUntilStopMode ? "STOP-controlled" : "fixed-count",
+                        xpDrainRoundsTarget, xpDrainRoundsPerMinute, xpFarmingDurationSeconds,
+                        BuildXpControllerDiagnostics()));
+                    NotifyXpController(
+                        "Auto-drain starting",
+                        xpDrainUntilStopMode
+                            ? "Until STOP is requested; protection off."
+                            : std::format("{} rounds; protection off.", xpDrainRoundsTarget),
+                        ImVec4(1.f, 0.7f, 0.2f, 1.f));
+                }
+                else {
+                    LogXpControllerEvent(std::format(
+                        "All connected non-host participants completed level-based farming; beginning continuous level drain. {}",
+                        BuildXpControllerDiagnostics()));
+                    NotifyXpController(
+                        "Level drain starting",
+                        "Protection off; continuous until level gains stop.",
+                        ImVec4(1.f, 0.7f, 0.2f, 1.f));
+                }
                 BeginXpRolloverRound();
             }
             else {
@@ -2541,9 +2782,12 @@ namespace PlayersTab {
         xpControllerStage = XpControllerStage::MatchTimer;
         xpControllerDeadline = std::chrono::steady_clock::now()
             + roundDuration;
-        if (xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP && xpDrainUntilStopMode) {
+        if (xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP
+            && (xpProgressMode != XpProgressMode::LegacyChat || xpDrainUntilStopMode)) {
             xpDrainMeetingAnnouncementPending = true;
-            State.rpcQueue.push(new RpcReportBody({}));
+            if (xpProgressMode == XpProgressMode::LegacyChat) {
+                State.rpcQueue.push(new RpcReportBody({}));
+            }
         }
         LogXpControllerEvent(std::format(
             "Game loading completed; starting {}ms round timer ({}s base + {}ms chat wait). {}",

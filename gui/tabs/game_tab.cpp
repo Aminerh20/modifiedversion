@@ -277,11 +277,23 @@ namespace GameTab {
                 ImGui::Dummy(ImVec2(4, 4) * State.dpiScale);
                 const bool cycleRunning = PlayersTab::IsXpControllerRunning();
                 if (!cycleRunning) {
+                    int progressMode = PlayersTab::GetXpProgressMode();
+                    const char* progressModes[] = {
+                        "Level tracking",
+                        "Level tracking + chat fallback",
+                        "Legacy chat confirmation",
+                    };
+                    ImGui::SetNextItemWidth(220 * State.dpiScale);
+                    if (ImGui::Combo("Progress mode", &progressMode,
+                        progressModes, IM_ARRAYSIZE(progressModes))) {
+                        PlayersTab::SetXpProgressMode(progressMode);
+                    }
+                }
+                if (!cycleRunning && PlayersTab::GetXpProgressMode() != 0) {
                     bool confirmFarming = PlayersTab::GetXpFarmingConfirmationMode();
                     if (ImGui::Checkbox("Require farming XP confirmation", &confirmFarming)) {
                         PlayersTab::SetXpFarmingConfirmationMode(confirmFarming);
                     }
-
                     bool drainUntilStop = PlayersTab::GetXpDrainUntilStopMode();
                     if (ImGui::Checkbox("Drain until someone types STOP", &drainUntilStop)) {
                         PlayersTab::SetXpDrainUntilStopMode(drainUntilStop);
