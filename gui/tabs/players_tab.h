@@ -53,6 +53,8 @@ namespace PlayersTab {
 	void SetXpFarmingConfirmationMode(bool enabled);
 	bool GetXpDrainUntilStopMode();
 	void SetXpDrainUntilStopMode(bool enabled);
+	bool GetXpDrainFarmingPromptMode();
+	void SetXpDrainFarmingPromptMode(bool enabled);
 	void PauseXpController();
 	void ResumeXpController();
 	bool IsXpControllerPaused();

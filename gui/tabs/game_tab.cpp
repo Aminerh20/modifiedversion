@@ -298,6 +298,10 @@ namespace GameTab {
                     if (ImGui::Checkbox("Drain until someone types STOP", &drainUntilStop)) {
                         PlayersTab::SetXpDrainUntilStopMode(drainUntilStop);
                     }
+                    bool drainFarmingPrompt = PlayersTab::GetXpDrainFarmingPromptMode();
+                    if (ImGui::Checkbox("Offer one farming round every 4 drain rounds", &drainFarmingPrompt)) {
+                        PlayersTab::SetXpDrainFarmingPromptMode(drainFarmingPrompt);
+                    }
                 }
                 else {
                     ImGui::TextDisabled(
@@ -311,6 +315,10 @@ namespace GameTab {
                     ImGui::TextDisabled(
                         "Drain starts 30s after its notice, runs %d 35s rounds without protection, and waits %ds between rounds.",
                         drainRoundTarget, PlayersTab::GetXpDrainBetweenRoundRejoinSeconds());
+                }
+                if (PlayersTab::GetXpDrainFarmingPromptMode()) {
+                    ImGui::TextDisabled(
+                        "After every 4 drain rounds, wait 20s after lobby return, then give players 20s to type ME for one farming round.");
                 }
                 ImGui::TextDisabled(
                     "When draining ends, the cycle waits 10s for the lobby to settle, announces the end and rejoin time, then waits the full %ds before farming restarts.",
