@@ -1201,7 +1201,7 @@ namespace PlayersTab {
             "You have 30 seconds. No reply counts as RETRY.");
 
         xpControllerStage = XpControllerStage::FarmingConfirmations;
-        xpControllerDeadline = std::chrono::steady_clock::time_point::max();
+        xpControllerDeadline = (std::chrono::steady_clock::time_point::max)();
         LogXpControllerEvent(std::format(
             "Queued farming confirmation prompt for assigned IDs [{}]; the response window starts after both messages are sent.",
             assignedNames));
@@ -1513,7 +1513,7 @@ namespace PlayersTab {
     std::string GetXpControllerStatus() {
         if (!IsXpControllerRunning()) return "Stopped";
         if (xpControllerStage == XpControllerStage::FarmingConfirmations
-            && xpControllerDeadline == std::chrono::steady_clock::time_point::max()) {
+            && xpControllerDeadline == (std::chrono::steady_clock::time_point::max)()) {
             return "Sending farming confirmation prompt";
         }
         if (xpHostAuthorityLostAt != std::chrono::steady_clock::time_point{}) {
@@ -1654,7 +1654,7 @@ namespace PlayersTab {
             }
             break;
         case XpControllerStage::FarmingConfirmations:
-            if (xpControllerDeadline == std::chrono::steady_clock::time_point::max()
+            if (xpControllerDeadline == (std::chrono::steady_clock::time_point::max)()
                 && xpPendingChatMessages.empty() && now >= xpPostChatDeadline) {
                 xpRoundChatWait = std::chrono::milliseconds::zero();
                 xpRoundChatMessageCount = 0;
