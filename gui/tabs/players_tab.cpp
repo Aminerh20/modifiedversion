@@ -1179,7 +1179,9 @@ namespace PlayersTab {
         if (unearnedOnly) {
             std::vector<Game::PlayerId> desiredShields;
             const size_t actualShieldCap = (std::min)(
-                static_cast<size_t>((std::max)(teamCap, 0)),
+                (std::min)(
+                    static_cast<size_t>((std::max)(teamCap, 0)),
+                    impostors.size()),
                 defenders.size());
             for (auto player : defenders) {
                 if (desiredShields.size() == actualShieldCap) break;
@@ -1327,18 +1329,24 @@ namespace PlayersTab {
         });
 
         std::vector<Game::PlayerId> desiredShields;
-        const auto desiredCount = (std::min)(static_cast<size_t>((std::max)(teamCap, 0)), eligibleDefenders.size());
+        const size_t requiredShieldCount =
+            (std::min)(static_cast<size_t>((std::max)(teamCap, 0)), xpRoundImpostorIds.size());
+        const auto desiredCount = (std::min)(requiredShieldCount, eligibleDefenders.size());
         if (xpControllerPhase == XpControllerPhase::FARMING_ROUND
-            && xpProgressMode != XpProgressMode::LegacyChat
-            && teamCap > 0
-            && desiredCount < static_cast<size_t>(teamCap)) {
+            && xpControllerStage == XpControllerStage::MatchTimer
+            && requiredShieldCount > 0
+            && desiredCount < requiredShieldCount) {
+            if (!xpRoundShieldFailure) {
+                LogXpControllerEvent(std::format(
+                    "Round shield failure: requiredTargets={}, availableReplacementTargets={}.",
+                    requiredShieldCount, desiredCount));
+            }
             xpRoundShieldFailure = true;
-            LogXpControllerEvent(std::format(
-                "Round shield failure: required={}, availableReplacementTargets={}.",
-                teamCap, desiredCount));
         }
-        else if (xpControllerPhase == XpControllerPhase::FARMING_ROUND
-            && xpProgressMode != XpProgressMode::LegacyChat) {
+        else if (xpRoundShieldFailure && !xpRoundShieldFailureWaived) {
+            LogXpControllerEvent(std::format(
+                "Farming shield target restored: requiredTargets={}, availableTargets={}; canceling pending failure.",
+                requiredShieldCount, desiredCount));
             xpRoundShieldFailure = false;
         }
         for (auto player : eligibleDefenders) {
