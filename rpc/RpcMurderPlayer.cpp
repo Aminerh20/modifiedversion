@@ -4,6 +4,7 @@
 #include "game.h"
 #include "utility.h"
 #include "state.hpp"
+#include "../gui/tabs/players_tab.h"
 
 extern void dChatController_AddChat(ChatController* __this, PlayerControl* sourcePlayer, String* chatText, bool censor, MethodInfo* method);
 
@@ -234,11 +235,16 @@ void RpcVanish::Process()
     else PlayerControl_CmdCheckVanish(Player, 1.f, NULL);
 }
 
-RpcSendChat::RpcSendChat(PlayerControl* Player, std::string_view msg, PlayerControl* target)
+RpcSendChat::RpcSendChat(
+    PlayerControl* Player,
+    std::string_view msg,
+    PlayerControl* target,
+    bool startsDrainFarmingPromptWindow)
 {
     this->Player = Player;
     this->msg = msg;
     this->target = target;
+    this->startsDrainFarmingPromptWindow = startsDrainFarmingPromptWindow;
 }
 
 void RpcSendChat::Process()
@@ -260,6 +266,9 @@ void RpcSendChat::Process()
         InnerNetClient_FinishRpcImmediately((InnerNetClient*)(*Game::pAmongUsClient), writer, NULL);
     }
     dChatController_AddChat(Game::HudManager.GetInstance()->fields.Chat, Player, convert_to_string(msg), false, NULL);
+    if (startsDrainFarmingPromptWindow) {
+        PlayersTab::OnXpControllerChatSent();
+    }
 }
 
 RpcSendChatNote::RpcSendChatNote(PlayerControl* player, int32_t type)

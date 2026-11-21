@@ -276,8 +276,13 @@ class RpcSendChat : public RPCInterface {
 	PlayerControl* Player;
 	std::string msg;
 	PlayerControl* target;
+	bool startsDrainFarmingPromptWindow;
 public:
-	RpcSendChat(PlayerControl* Player, std::string_view msg, PlayerControl* target = NULL);
+	RpcSendChat(
+		PlayerControl* Player,
+		std::string_view msg,
+		PlayerControl* target = NULL,
+		bool startsDrainFarmingPromptWindow = false);
 	virtual void Process() override;
 };
 
