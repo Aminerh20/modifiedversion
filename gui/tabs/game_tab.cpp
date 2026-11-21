@@ -289,7 +289,7 @@ namespace GameTab {
                         PlayersTab::SetXpProgressMode(progressMode);
                     }
                 }
-                if (!cycleRunning && PlayersTab::GetXpProgressMode() != 0) {
+                if (!cycleRunning && PlayersTab::GetXpProgressMode() == 1) {
                     bool confirmFarming = PlayersTab::GetXpFarmingConfirmationMode();
                     if (ImGui::Checkbox("Require farming XP confirmation", &confirmFarming)) {
                         PlayersTab::SetXpFarmingConfirmationMode(confirmFarming);
