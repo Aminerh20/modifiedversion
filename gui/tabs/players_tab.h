@@ -68,6 +68,7 @@ namespace PlayersTab {
 	std::string GetXpLevelRecorderStatus();
 	void TickXpController();
 	void OnXpControllerGameStarted();
+	void OnXpControllerProtectedCrewmateKilled(Game::PlayerId killerId, Game::PlayerId victimId);
 	void OnXpControllerChatMessage(Game::PlayerId playerId, const std::string& message);
 	bool ShouldHoldXpDrainMeeting();
 	std::string GetXpControllerStatus();

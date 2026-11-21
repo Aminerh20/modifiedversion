@@ -74,6 +74,7 @@ namespace PlayersTab {
         bool disconnected_after_rejoin_request = false;
         bool was_impostor_this_round = false;
         bool farmed_this_round = false;
+        bool demoted_to_ghost_this_round = false;
         std::string name;
     };
 
@@ -111,6 +112,9 @@ namespace PlayersTab {
         int drainRoundsCompleted = 0;
         int drainRoundsTarget = 0;
         bool drainStopRequested = false;
+        size_t drainStopEligibleCount = 0;
+        size_t drainStopRequiredVotes = 0;
+        std::unordered_set<Game::PlayerId> drainStopVoterIds;
         bool drainFarmingPromptResponse = false;
         bool drainFarmingPromptResponseWindowStarted = false;
         bool hasDrainFarmingPromptPlayer = false;
@@ -134,6 +138,9 @@ namespace PlayersTab {
         std::unordered_set<Game::PlayerId> deferredFarmingRetryUsedIds;
         bool deferredFarmingRetryActive = false;
         bool forceDrainAfterDeferredRetry = false;
+        std::unordered_map<Game::PlayerId, int> protectedKillCounts;
+        std::unordered_set<Game::PlayerId> ghostedImpostorIds;
+        bool farmingSafetyWarningsPending = false;
     };
 
     static XpControllerPhase xpControllerPhase = XpControllerPhase::STOPPED;
@@ -149,6 +156,9 @@ namespace PlayersTab {
     static std::unordered_set<Game::PlayerId> xpDeferredFarmingRetryUsedIds;
     static bool xpDeferredFarmingRetryActive = false;
     static bool xpForceDrainAfterDeferredRetry = false;
+    static std::unordered_map<Game::PlayerId, int> xpRoundProtectedKillCounts;
+    static std::unordered_set<Game::PlayerId> xpRoundGhostedImpostorIds;
+    static bool xpFarmingSafetyWarningsPending = false;
     static std::chrono::steady_clock::time_point xpControllerDeadline;
     static std::chrono::steady_clock::time_point xpLastRosterCheck;
     static std::chrono::steady_clock::time_point xpTransitionGraceDeadline;
@@ -192,6 +202,9 @@ namespace PlayersTab {
     static bool xpDrainFarmingPromptGracePending = false;
     static bool xpFarmingConfirmationPending = false;
     static bool xpDrainStopRequested = false;
+    static size_t xpDrainStopEligibleCount = 0;
+    static size_t xpDrainStopRequiredVotes = 0;
+    static std::unordered_set<Game::PlayerId> xpDrainStopVoterIds;
     static bool xpDrainRejoinGracePending = false;
     static bool xpDrainRejoinNoticePendingStart = false;
     static bool xpDrainMeetingAnnouncementPending = false;
@@ -412,7 +425,8 @@ namespace PlayersTab {
     }
 
     static void TickXpControllerChat() {
-        if (!xpPendingInGameChatMessages.empty()
+        if (!xpDrainMeetingAnnouncementPending
+            && !xpPendingInGameChatMessages.empty()
             && IsInGame()
             && State.ChatCooldown >= 3.f
             && CanSendXpControllerChat()) {
@@ -421,17 +435,27 @@ namespace PlayersTab {
             State.rpcQueue.push(new RpcSendChat(*Game::pLocalPlayer, message));
             State.MessageSent = true;
             LogXpControllerEvent(std::format("Queued in-game acknowledgment: '{}'.", message));
+            return;
         }
         if (xpDrainMeetingAnnouncementPending && IsInGame() && State.InMeeting
             && State.ChatCooldown >= 3.f && CanSendXpControllerChat()) {
             const std::string meetingText =
                 xpProgressMode == XpProgressMode::LegacyChat
-                ? "STOP only if everyone has finished draining. If STOP was premature, type CONTINUE."
+                ? std::format("Draining round {}.", xpDrainRoundsCompleted + 1)
                 : std::format("Drain round {}. Meeting stays open while levels are tracked.",
                     xpDrainRoundsCompleted + 1);
             State.rpcQueue.push(new RpcSendChat(*Game::pLocalPlayer, meetingText));
             State.MessageSent = true;
             xpDrainMeetingAnnouncementPending = false;
+            if (xpProgressMode == XpProgressMode::LegacyChat) {
+                xpPendingInGameChatMessages.push_back(std::format(
+                    "Type STOP to stop auto-drain. Majority needed: {}/{}.",
+                    xpDrainStopRequiredVotes, xpDrainStopEligibleCount));
+            }
+            LogXpControllerEvent(std::format(
+                "Queued drain round {} meeting announcement.",
+                xpDrainRoundsCompleted + 1));
+            return;
         }
         if (xpPendingChatMessages.empty() || !IsInLobby()) return;
 
@@ -877,7 +901,7 @@ namespace PlayersTab {
         }
 
         const std::string drainStartMessage = xpDrainUntilStopMode
-            ? "Draining starts in 30s. STOP only after everyone is done. If premature, type CONTINUE."
+            ? "Draining starts in 30s. Type STOP only when you are done."
             : std::format(
                 "Auto-drain starts in 30s: {} rounds, {}s between; each ends after 35s.",
                 GetXpDrainRoundsTarget(), xpDrainBetweenRoundRejoinSeconds);
@@ -963,7 +987,11 @@ namespace PlayersTab {
         for (auto& [playerId, tracked] : xpTrackedPlayers) {
             tracked.was_impostor_this_round = false;
             tracked.farmed_this_round = false;
+            tracked.demoted_to_ghost_this_round = false;
         }
+        xpRoundProtectedKillCounts.clear();
+        xpRoundGhostedImpostorIds.clear();
+        xpFarmingSafetyWarningsPending = false;
 
         std::vector<PlayerControl*> nonHostPlayers;
         for (auto player : players) {
@@ -1310,6 +1338,62 @@ namespace PlayersTab {
         return activeCount > 0 && leveledCount == activeCount;
     }
 
+    static bool DemoteFastestFarmingImpostorToGhost() {
+        Game::PlayerId offenderId = 0;
+        int highestKillCount = 0;
+        for (const auto playerId : xpRoundImpostorIds) {
+            const auto tracked = xpTrackedPlayers.find(playerId);
+            const auto kills = xpRoundProtectedKillCounts.find(playerId);
+            if (tracked == xpTrackedPlayers.end()
+                || !tracked->second.is_impostor
+                || tracked->second.demoted_to_ghost_this_round
+                || kills == xpRoundProtectedKillCounts.end()
+                || kills->second <= highestKillCount) continue;
+            offenderId = playerId;
+            highestKillCount = kills->second;
+        }
+
+        if (highestKillCount == 0) return false;
+        auto offender = GetPlayerControlById(offenderId);
+        auto tracked = xpTrackedPlayers.find(offenderId);
+        if (offender == nullptr || tracked == xpTrackedPlayers.end()) return false;
+
+        State.rpcQueue.push(new RpcSetRole(offender, RoleTypes__Enum::ImpostorGhost));
+        tracked->second.is_impostor = false;
+        tracked->second.demoted_to_ghost_this_round = true;
+        xpRoundGhostedImpostorIds.insert(offenderId);
+        xpFarmingSafetyWarningsPending = true;
+        LogXpControllerEvent(std::format(
+            "Demoted farming Impostor to ghost after {} protected-target kill(s) and no replacement targets: playerId={}, name='{}'.",
+            highestKillCount, offenderId, tracked->second.name));
+        return true;
+    }
+
+    void OnXpControllerProtectedCrewmateKilled(
+        Game::PlayerId killerId,
+        Game::PlayerId victimId) {
+        if (!IsXpControllerRunning()
+            || !IsHost()
+            || xpControllerPhase != XpControllerPhase::FARMING_ROUND
+            || xpControllerStage != XpControllerStage::MatchTimer) return;
+
+        const auto killer = xpTrackedPlayers.find(killerId);
+        const auto victim = xpTrackedPlayers.find(victimId);
+        if (killer == xpTrackedPlayers.end()
+            || victim == xpTrackedPlayers.end()
+            || killer->second.is_host
+            || !killer->second.is_impostor
+            || killer->second.demoted_to_ghost_this_round
+            || victim->second.is_host
+            || victim->second.is_impostor
+            || !victim->second.is_shielded) return;
+
+        const int killCount = ++xpRoundProtectedKillCounts[killerId];
+        LogXpControllerEvent(std::format(
+            "Farming shield target killed: killerId={}, victimId={}, killerProtectedKillCount={}.",
+            killerId, victimId, killCount));
+    }
+
     static void ReconcileMatchCycleShields() {
         if (!IsXpControllerRunning() || !IsHost()
             || xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP) return;
@@ -1321,6 +1405,7 @@ namespace PlayersTab {
             auto tracked = xpTrackedPlayers.find(player->fields.PlayerId);
             auto data = GetPlayerData(player);
             if (tracked == xpTrackedPlayers.end() || tracked->second.is_impostor
+                || tracked->second.demoted_to_ghost_this_round
                 || data == nullptr || data->fields.IsDead) continue;
             eligibleDefenders.push_back(player);
         }
@@ -1329,9 +1414,29 @@ namespace PlayersTab {
         });
 
         std::vector<Game::PlayerId> desiredShields;
-        const size_t requiredShieldCount =
-            (std::min)(static_cast<size_t>((std::max)(teamCap, 0)), xpRoundImpostorIds.size());
-        const auto desiredCount = (std::min)(requiredShieldCount, eligibleDefenders.size());
+        const auto getRequiredShieldCount = [&]() {
+            const auto activeImpostors = std::count_if(
+                xpRoundImpostorIds.begin(), xpRoundImpostorIds.end(),
+                [](Game::PlayerId playerId) {
+                    const auto tracked = xpTrackedPlayers.find(playerId);
+                    return tracked != xpTrackedPlayers.end()
+                        && tracked->second.is_impostor
+                        && !tracked->second.demoted_to_ghost_this_round;
+                });
+            return (std::min)(
+                static_cast<size_t>((std::max)(teamCap, 0)),
+                static_cast<size_t>(activeImpostors));
+        };
+        size_t requiredShieldCount = getRequiredShieldCount();
+        size_t desiredCount = (std::min)(requiredShieldCount, eligibleDefenders.size());
+        if (xpControllerPhase == XpControllerPhase::FARMING_ROUND
+            && xpControllerStage == XpControllerStage::MatchTimer
+            && requiredShieldCount > 0
+            && desiredCount < requiredShieldCount
+            && DemoteFastestFarmingImpostorToGhost()) {
+            requiredShieldCount = getRequiredShieldCount();
+            desiredCount = (std::min)(requiredShieldCount, eligibleDefenders.size());
+        }
         if (xpControllerPhase == XpControllerPhase::FARMING_ROUND
             && xpControllerStage == XpControllerStage::MatchTimer
             && requiredShieldCount > 0
@@ -1940,6 +2045,23 @@ namespace PlayersTab {
     }
 
     static void ProcessXpLobbyDelay() {
+        if (xpFarmingSafetyWarningsPending) {
+            for (const auto playerId : xpRoundGhostedImpostorIds) {
+                const auto tracked = xpTrackedPlayers.find(playerId);
+                const std::string name = tracked == xpTrackedPlayers.end()
+                    ? std::format("Player {}", playerId)
+                    : XpControllerChatName(tracked->second.name);
+                QueueXpControllerChat(std::format(
+                    "{}: slow your autoclicker; don't get past ghost protection.",
+                    name));
+            }
+            QueueXpControllerChat(
+                "Impostors: split up; never target the same crewmate.");
+            xpFarmingSafetyWarningsPending = false;
+            LogXpControllerEvent(std::format(
+                "Queued post-grace safety warnings for {} ghosted farming Impostor(s).",
+                xpRoundGhostedImpostorIds.size()));
+        }
         if (xpForceDrainAfterDeferredRetry) {
             xpForceDrainAfterDeferredRetry = false;
             xpDrainRoundsCompleted = 0;
@@ -2154,6 +2276,9 @@ namespace PlayersTab {
         xpControllerSnapshot.drainRoundsCompleted = xpDrainRoundsCompleted;
         xpControllerSnapshot.drainRoundsTarget = xpDrainRoundsTarget;
         xpControllerSnapshot.drainStopRequested = xpDrainStopRequested;
+        xpControllerSnapshot.drainStopEligibleCount = xpDrainStopEligibleCount;
+        xpControllerSnapshot.drainStopRequiredVotes = xpDrainStopRequiredVotes;
+        xpControllerSnapshot.drainStopVoterIds = xpDrainStopVoterIds;
         xpControllerSnapshot.drainFarmingPromptResponse = xpDrainFarmingPromptResponse;
         xpControllerSnapshot.drainFarmingPromptResponseWindowStarted =
             xpDrainFarmingPromptResponseWindowStarted;
@@ -2180,6 +2305,10 @@ namespace PlayersTab {
         xpControllerSnapshot.deferredFarmingRetryUsedIds = xpDeferredFarmingRetryUsedIds;
         xpControllerSnapshot.deferredFarmingRetryActive = xpDeferredFarmingRetryActive;
         xpControllerSnapshot.forceDrainAfterDeferredRetry = xpForceDrainAfterDeferredRetry;
+        xpControllerSnapshot.protectedKillCounts = xpRoundProtectedKillCounts;
+        xpControllerSnapshot.ghostedImpostorIds = xpRoundGhostedImpostorIds;
+        xpControllerSnapshot.farmingSafetyWarningsPending =
+            xpFarmingSafetyWarningsPending;
         NotifyXpController(
             "Match Cycle snapshot saved",
             "Pause and restore this exact controller state.",
@@ -2194,6 +2323,9 @@ namespace PlayersTab {
         xpDrainRoundsCompleted = xpControllerSnapshot.drainRoundsCompleted;
         xpDrainRoundsTarget = xpControllerSnapshot.drainRoundsTarget;
         xpDrainStopRequested = xpControllerSnapshot.drainStopRequested;
+        xpDrainStopEligibleCount = xpControllerSnapshot.drainStopEligibleCount;
+        xpDrainStopRequiredVotes = xpControllerSnapshot.drainStopRequiredVotes;
+        xpDrainStopVoterIds = xpControllerSnapshot.drainStopVoterIds;
         xpDrainFarmingPromptResponse = xpControllerSnapshot.drainFarmingPromptResponse;
         xpDrainFarmingPromptResponseWindowStarted =
             xpControllerSnapshot.drainFarmingPromptResponseWindowStarted;
@@ -2227,6 +2359,16 @@ namespace PlayersTab {
             xpControllerSnapshot.deferredFarmingRetryActive;
         xpForceDrainAfterDeferredRetry =
             xpControllerSnapshot.forceDrainAfterDeferredRetry;
+        xpRoundProtectedKillCounts = xpControllerSnapshot.protectedKillCounts;
+        xpRoundGhostedImpostorIds = xpControllerSnapshot.ghostedImpostorIds;
+        xpFarmingSafetyWarningsPending =
+            xpControllerSnapshot.farmingSafetyWarningsPending;
+        for (const auto playerId : xpRoundGhostedImpostorIds) {
+            const auto tracked = xpTrackedPlayers.find(playerId);
+            if (tracked == xpTrackedPlayers.end()) continue;
+            tracked->second.is_impostor = false;
+            tracked->second.demoted_to_ghost_this_round = true;
+        }
         const auto now = std::chrono::steady_clock::now();
         xpControllerDeadline = xpControllerSnapshot.deadlineIsMax
             ? (std::chrono::steady_clock::time_point::max)()
@@ -2500,29 +2642,53 @@ namespace PlayersTab {
         if (xpDrainUntilStopMode && xpControllerStage == XpControllerStage::MatchTimer
             && xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP
             && State.InMeeting) {
-            if (command == "stop" && !xpDrainStopRequested) {
-                xpDrainStopRequested = true;
+            if (command == "stop") {
+                const auto tracked = xpTrackedPlayers.find(playerId);
+                const auto connectedPlayers = GetConnectedXpPlayers();
+                const bool eligibleVoter = tracked != xpTrackedPlayers.end()
+                    && !tracked->second.is_host
+                    && std::any_of(
+                        connectedPlayers.begin(), connectedPlayers.end(),
+                        [playerId](PlayerControl* player) {
+                            return player->fields.PlayerId == playerId;
+                        });
+                if (!eligibleVoter) {
+                    LogXpControllerEvent(std::format(
+                        "Drain STOP vote ignored for ineligible playerId={}.",
+                        playerId));
+                    return;
+                }
+
+                const bool inserted = xpDrainStopVoterIds.insert(playerId).second;
+                const size_t voteCount = xpDrainStopVoterIds.size();
+                if (!inserted) {
+                    xpPendingInGameChatMessages.push_back(std::format(
+                        "STOP already counted: {}/{}.",
+                        voteCount, xpDrainStopRequiredVotes));
+                    return;
+                }
+
                 LogXpControllerEvent(std::format(
-                    "Drain stop requested by playerId={} during round {}. It will take effect after this round's timer unless canceled.",
-                    playerId, xpDrainRoundsCompleted + 1));
-                xpPendingInGameChatMessages.push_back(
-                    "STOP set. Type CONTINUE only if STOP was premature.");
-                NotifyXpController(
-                    "Drain stop requested",
-                    "Type CONTINUE only if STOP was premature.",
-                    ImVec4(1.f, 0.7f, 0.2f, 1.f));
-            }
-            else if (command == "continue" && xpDrainStopRequested) {
-                xpDrainStopRequested = false;
-                LogXpControllerEvent(std::format(
-                    "Pending drain stop canceled by playerId={} during round {}.",
-                    playerId, xpDrainRoundsCompleted + 1));
-                xpPendingInGameChatMessages.push_back(
-                    "CONTINUE received. Draining will continue.");
-                NotifyXpController(
-                    "Drain stop canceled",
-                    "Draining will continue.",
-                    ImVec4(0.2f, 0.8f, 1.f, 1.f));
+                    "Drain STOP vote recorded: playerId={}, votes={}/{}, round={}.",
+                    playerId, voteCount, xpDrainStopRequiredVotes,
+                    xpDrainRoundsCompleted + 1));
+                if (!xpDrainStopRequested
+                    && voteCount >= xpDrainStopRequiredVotes) {
+                    xpDrainStopRequested = true;
+                    xpPendingInGameChatMessages.push_back(std::format(
+                        "STOP {}/{}. Majority reached; ending after this round.",
+                        voteCount, xpDrainStopRequiredVotes));
+                    NotifyXpController(
+                        "Drain stop approved",
+                        std::format("{}/{} votes. Ending after this round.",
+                            voteCount, xpDrainStopRequiredVotes),
+                        ImVec4(1.f, 0.7f, 0.2f, 1.f));
+                }
+                else {
+                    xpPendingInGameChatMessages.push_back(std::format(
+                        "STOP {}/{}.",
+                        voteCount, xpDrainStopRequiredVotes));
+                }
             }
         }
     }
@@ -2633,6 +2799,9 @@ namespace PlayersTab {
         xpDrainRoundsCompleted = 0;
         xpDrainRoundsTarget = 0;
         xpDrainStopRequested = false;
+        xpDrainStopEligibleCount = 0;
+        xpDrainStopRequiredVotes = 0;
+        xpDrainStopVoterIds.clear();
         xpDrainRejoinGracePending = false;
         xpDrainRejoinNoticePendingStart = false;
         xpDrainMeetingAnnouncementPending = false;
@@ -2948,7 +3117,7 @@ namespace PlayersTab {
                 }
                 else if (xpDrainUntilStopMode) {
                     QueueXpControllerChat(
-                        "Draining starts in 30s. STOP only after everyone is done. If premature, type CONTINUE.",
+                        "Draining starts in 30s. Type STOP only when you are done.",
                         std::chrono::seconds::zero());
                 }
                 else {
@@ -3008,6 +3177,13 @@ namespace PlayersTab {
             + roundDuration;
         if (xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP
             && (xpProgressMode != XpProgressMode::LegacyChat || xpDrainUntilStopMode)) {
+            xpDrainStopEligibleCount = GetConnectedNonHostCount();
+            xpDrainStopRequiredVotes = xpProgressMode == XpProgressMode::LegacyChat
+                && xpDrainUntilStopMode
+                ? (xpDrainStopEligibleCount + 1) / 2
+                : 0;
+            xpDrainStopVoterIds.clear();
+            xpDrainStopRequested = false;
             xpDrainMeetingAnnouncementPending = true;
             if (xpProgressMode == XpProgressMode::LegacyChat) {
                 State.rpcQueue.push(new RpcReportBody({}));

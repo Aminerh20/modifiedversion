@@ -1034,6 +1034,11 @@ void dPlayerControl_MurderPlayer(PlayerControl* __this, PlayerControl* target, M
 
         if (static_cast<int32_t>(resultFlags) & static_cast<int32_t>(MurderResultFlags__Enum::Succeeded)) {
             State.validDeadBodyIds.push_back(target->fields.PlayerId);
+            if (__this != nullptr && target != nullptr) {
+                PlayersTab::OnXpControllerProtectedCrewmateKilled(
+                    __this->fields.PlayerId,
+                    target->fields.PlayerId);
+            }
         }
         auto killer = GetEventPlayerControl(__this);
         auto victim = GetEventPlayerControl(target);
