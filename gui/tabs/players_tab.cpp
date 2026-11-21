@@ -131,6 +131,7 @@ namespace PlayersTab {
         std::unordered_map<Game::PlayerId, bool> confirmationResponses;
         std::unordered_map<Game::PlayerId, uint32_t> roundLevelBaselines;
         bool roundShieldFailure = false;
+        bool noActiveFarmingImpostors = false;
         std::unordered_set<Game::PlayerId> drainFarmingMeUsedPlayerIds;
         bool legacyFarmingRoundFailed = false;
         std::unordered_map<Game::PlayerId, int> legacyFarmingFailureStreak;
@@ -190,6 +191,7 @@ namespace PlayersTab {
     static std::unordered_map<Game::PlayerId, uint32_t> xpRoundLevelBaselines;
     static bool xpRoundShieldFailure = false;
     static bool xpRoundShieldFailureWaived = false;
+    static bool xpNoActiveFarmingImpostors = false;
     static std::chrono::steady_clock::time_point xpRoundStartedAt;
     static std::unordered_set<Game::PlayerId> xpDrainFarmingMeUsedPlayerIds;
     static bool xpLegacyFarmingRoundFailed = false;
@@ -1369,6 +1371,22 @@ namespace PlayersTab {
         return true;
     }
 
+    static size_t CountActiveXpFarmingImpostors() {
+        return static_cast<size_t>(std::count_if(
+            xpRoundImpostorIds.begin(), xpRoundImpostorIds.end(),
+            [](Game::PlayerId playerId) {
+                const auto tracked = xpTrackedPlayers.find(playerId);
+                if (tracked == xpTrackedPlayers.end()
+                    || !tracked->second.is_impostor
+                    || tracked->second.demoted_to_ghost_this_round
+                    || !tracked->second.connected) return false;
+                auto player = GetPlayerControlById(playerId);
+                if (player == nullptr) return false;
+                auto data = GetPlayerData(player);
+                return data != nullptr && !data->fields.IsDead;
+            }));
+    }
+
     void OnXpControllerProtectedCrewmateKilled(
         Game::PlayerId killerId,
         Game::PlayerId victimId) {
@@ -1414,18 +1432,11 @@ namespace PlayersTab {
         });
 
         std::vector<Game::PlayerId> desiredShields;
+        size_t activeImpostorCount = CountActiveXpFarmingImpostors();
         const auto getRequiredShieldCount = [&]() {
-            const auto activeImpostors = std::count_if(
-                xpRoundImpostorIds.begin(), xpRoundImpostorIds.end(),
-                [](Game::PlayerId playerId) {
-                    const auto tracked = xpTrackedPlayers.find(playerId);
-                    return tracked != xpTrackedPlayers.end()
-                        && tracked->second.is_impostor
-                        && !tracked->second.demoted_to_ghost_this_round;
-                });
             return (std::min)(
                 static_cast<size_t>((std::max)(teamCap, 0)),
-                static_cast<size_t>(activeImpostors));
+                CountActiveXpFarmingImpostors());
         };
         size_t requiredShieldCount = getRequiredShieldCount();
         size_t desiredCount = (std::min)(requiredShieldCount, eligibleDefenders.size());
@@ -1434,10 +1445,22 @@ namespace PlayersTab {
             && requiredShieldCount > 0
             && desiredCount < requiredShieldCount
             && DemoteFastestFarmingImpostorToGhost()) {
+            activeImpostorCount = CountActiveXpFarmingImpostors();
             requiredShieldCount = getRequiredShieldCount();
             desiredCount = (std::min)(requiredShieldCount, eligibleDefenders.size());
         }
         if (xpControllerPhase == XpControllerPhase::FARMING_ROUND
+            && xpControllerStage == XpControllerStage::MatchTimer
+            && !xpRoundImpostorIds.empty()
+            && activeImpostorCount == 0) {
+            xpNoActiveFarmingImpostors = true;
+            if (!xpRoundShieldFailure) {
+                LogXpControllerEvent(
+                    "No active farming Impostors remain after ghost conversion; ending the round early.");
+            }
+            xpRoundShieldFailure = true;
+        }
+        else if (xpControllerPhase == XpControllerPhase::FARMING_ROUND
             && xpControllerStage == XpControllerStage::MatchTimer
             && requiredShieldCount > 0
             && desiredCount < requiredShieldCount) {
@@ -1514,6 +1537,7 @@ namespace PlayersTab {
         if (!ConfigureMatchCycleTeams(true)) return;
         xpRoundShieldFailure = false;
         xpRoundShieldFailureWaived = false;
+        xpNoActiveFarmingImpostors = false;
         xpLegacyFarmingRoundFailed = false;
         xpRoundStartedAt = {};
         xpForceDrainAfterDeferredRetry = false;
@@ -1556,6 +1580,7 @@ namespace PlayersTab {
         if (!ConfigureMatchCycleTeams(false)) return;
         xpRoundShieldFailure = false;
         xpRoundShieldFailureWaived = false;
+        xpNoActiveFarmingImpostors = false;
         xpRoundStartedAt = {};
         if (xpProgressMode != XpProgressMode::LegacyChat) {
             CaptureXpRoundLevelBaselines(false);
@@ -1929,7 +1954,8 @@ namespace PlayersTab {
             }
             if (xpProgressMode == XpProgressMode::LegacyChat) {
                 xpLegacyFarmingRoundFailed =
-                    xpRoundShieldFailure && !xpRoundShieldFailureWaived;
+                    (xpRoundShieldFailure || xpNoActiveFarmingImpostors)
+                    && !xpRoundShieldFailureWaived;
                 if (xpLegacyFarmingRoundFailed) {
                     for (const auto playerId : xpRoundImpostorIds) {
                         xpFarmingCompletedPlayerIds.erase(playerId);
@@ -1968,6 +1994,7 @@ namespace PlayersTab {
                             "Deferred final retry failed; moving directly to draining.");
                     }
                     xpRoundShieldFailure = false;
+                    xpNoActiveFarmingImpostors = false;
                     LogXpControllerEvent(
                         "Legacy farming round failed before 50%; keeping the batch eligible for retry.");
                 }
@@ -2296,6 +2323,7 @@ namespace PlayersTab {
         xpControllerSnapshot.confirmationResponses = xpFarmingConfirmationResponses;
         xpControllerSnapshot.roundLevelBaselines = xpRoundLevelBaselines;
         xpControllerSnapshot.roundShieldFailure = xpRoundShieldFailure;
+        xpControllerSnapshot.noActiveFarmingImpostors = xpNoActiveFarmingImpostors;
         xpControllerSnapshot.roundShieldFailureWaived = xpRoundShieldFailureWaived;
         xpControllerSnapshot.roundStartedAt = xpRoundStartedAt;
         xpControllerSnapshot.drainFarmingMeUsedPlayerIds = xpDrainFarmingMeUsedPlayerIds;
@@ -2343,6 +2371,8 @@ namespace PlayersTab {
         xpFarmingConfirmationResponses = xpControllerSnapshot.confirmationResponses;
         xpRoundLevelBaselines = xpControllerSnapshot.roundLevelBaselines;
         xpRoundShieldFailure = xpControllerSnapshot.roundShieldFailure;
+        xpNoActiveFarmingImpostors =
+            xpControllerSnapshot.noActiveFarmingImpostors;
         xpRoundShieldFailureWaived = xpControllerSnapshot.roundShieldFailureWaived;
         xpRoundStartedAt = xpControllerSnapshot.roundStartedAt;
         xpDrainFarmingMeUsedPlayerIds =
@@ -3014,6 +3044,17 @@ namespace PlayersTab {
                 ReconcileMatchCycleShields();
             }
         }
+        if (xpControllerPhase == XpControllerPhase::FARMING_ROUND
+            && xpControllerStage == XpControllerStage::MatchTimer
+            && !xpRoundImpostorIds.empty()
+            && CountActiveXpFarmingImpostors() == 0) {
+            if (!xpNoActiveFarmingImpostors) {
+                LogXpControllerEvent(
+                    "No active farming Impostors remain; latching an early round end.");
+            }
+            xpNoActiveFarmingImpostors = true;
+            xpRoundShieldFailure = true;
+        }
         switch (xpControllerStage) {
         case XpControllerStage::PreparingRound:
             if (IsInLobby() && now >= xpControllerDeadline) StartPreparedXpMatch();
@@ -3027,12 +3068,17 @@ namespace PlayersTab {
             if (IsInLobby()) {
                 HandleXpRoundReturnedToLobby();
             }
-            else if (xpRoundShieldFailure) {
+            else if (xpRoundShieldFailure || xpNoActiveFarmingImpostors) {
                 if (HasXpRoundPassedFiftyPercent()) {
                     xpRoundShieldFailureWaived = true;
-                    xpRoundShieldFailure = false;
+                    if (!xpNoActiveFarmingImpostors) {
+                        xpRoundShieldFailure = false;
+                    }
                     LogXpControllerEvent(std::format(
-                        "Shield failure waived because the round passed 50% ({}/{}s); ending normally.",
+                        "{} waived because the round passed 50% ({}/{}s); ending normally.",
+                        xpNoActiveFarmingImpostors
+                            ? "No active farming Impostors"
+                            : "Shield failure",
                         std::chrono::duration_cast<std::chrono::seconds>(
                             std::chrono::steady_clock::now() - xpRoundStartedAt).count(),
                         xpControllerPhase == XpControllerPhase::FARMING_ROUND
@@ -3041,7 +3087,9 @@ namespace PlayersTab {
                     break;
                 }
                 LogXpControllerEvent(
-                    "Shield failure detected; force-ending round early.");
+                    xpNoActiveFarmingImpostors
+                        ? "No active farming Impostors remain; force-ending round early."
+                        : "Shield failure detected; force-ending round early.");
                 ForceEndXpMatch();
             }
             else if (now >= xpControllerDeadline) {
