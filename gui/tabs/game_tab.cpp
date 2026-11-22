@@ -281,6 +281,11 @@ namespace GameTab {
                         progressModes, IM_ARRAYSIZE(progressModes))) {
                         PlayersTab::SetXpProgressMode(progressMode);
                     }
+                    bool allowFourImpostors = PlayersTab::GetXpAllowFourImpostors();
+                    if (ImGui::Checkbox("Allow up to 4 Impostors (otherwise max 3)",
+                        &allowFourImpostors)) {
+                        PlayersTab::SetXpAllowFourImpostors(allowFourImpostors);
+                    }
                 }
                 if (!cycleRunning && PlayersTab::GetXpProgressMode() == 1) {
                     bool confirmFarming = PlayersTab::GetXpFarmingConfirmationMode();

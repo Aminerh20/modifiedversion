@@ -53,6 +53,8 @@ namespace PlayersTab {
 	void SetXpProgressMode(int mode);
 	bool GetXpFarmingConfirmationMode();
 	void SetXpFarmingConfirmationMode(bool enabled);
+	bool GetXpAllowFourImpostors();
+	void SetXpAllowFourImpostors(bool enabled);
 	bool GetXpDrainUntilStopMode();
 	void SetXpDrainUntilStopMode(bool enabled);
 	bool GetXpDrainFarmingPromptMode();
