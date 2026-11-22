@@ -2587,7 +2587,8 @@ namespace PlayersTab {
             : now + std::chrono::milliseconds(
                 xpControllerSnapshot.soloResumeDeadlineRemainingMs);
         xpSoloKeepAliveStartedAt =
-            xpControllerStage == XpControllerStage::SoloLobbyKeepAlive ? now : {};
+            xpControllerStage == XpControllerStage::SoloLobbyKeepAlive
+            ? now : std::chrono::steady_clock::time_point{};
         xpTransitionGraceDeadline =
             now + std::chrono::milliseconds(xpControllerSnapshot.transitionRemainingMs);
         xpControllerPaused = false;
