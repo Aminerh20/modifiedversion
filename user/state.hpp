@@ -80,6 +80,12 @@ public:
     bool UseCustomServer = false;
     std::string CustomServerIp = "";
     uint16_t CustomServerPort = 22023;
+    std::string CustomServerEndpointKey = "";
+    std::string CustomHostCode = "AFRTDG";
+    int32_t CustomHostGameId = 0;
+    std::string CustomHostTargetSuffix = "RTDG";
+    bool CustomServerUseDtls = false;
+    bool CustomServerOverrideDtls = false;
     bool ForceDTLS = false;
     bool SpoofGuestAccount = false;
     bool SpoofModdedHost = false;

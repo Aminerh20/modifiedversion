@@ -34,6 +34,7 @@ DO_APP_FUNC(Transform*, Transform_FindChild, (Transform* __this, String* name, M
 DO_APP_FUNC(float, Vector2_Distance, (Vector2 a, Vector2 b, MethodInfo* method), "UnityEngine.CoreModule, System.Single UnityEngine.Vector2::Distance(UnityEngine.Vector2, UnityEngine.Vector2)");
 DO_APP_FUNC(bool, Collider2D_OverlapPoint, (Collider2D* __this, Vector2 point, MethodInfo* method), "UnityEngine.Physics2DModule, System.Boolean UnityEngine.Collider2D::OverlapPoint(UnityEngine.Vector2)");
 DO_APP_FUNC(String*, Application_get_version, (MethodInfo* method), "UnityEngine.CoreModule, System.String UnityEngine.Application::get_version()");
+DO_APP_FUNC(String*, Application_get_persistentDataPath, (MethodInfo* method), "UnityEngine.CoreModule, System.String UnityEngine.Application::get_persistentDataPath()");
 DO_APP_FUNC(void, Renderer_set_enabled, (Renderer* __this, bool value, MethodInfo* method), "UnityEngine.CoreModule, System.Void UnityEngine.Renderer::set_enabled(System.Boolean)");
 DO_APP_FUNC(int32_t, Camera_GetAllCameras, (Camera__Array* cameras, MethodInfo* method), "UnityEngine.CoreModule, System.Int32 UnityEngine.Camera::GetAllCameras(UnityEngine.Camera[])");
 DO_APP_FUNC(int32_t, Camera_get_allCamerasCount, (MethodInfo* method), "UnityEngine.CoreModule, System.Int32 UnityEngine.Camera::get_allCamerasCount()");
@@ -436,6 +437,7 @@ DO_APP_FUNC(void, EndGameNavigation_ShowDefaultNavigation, (EndGameNavigation* _
 //DO_APP_FUNC(void*, EndGameNavigation_CoJoinGame, (EndGameNavigation* __this, MethodInfo* method), "Assembly-CSharp, System.Collections.IEnumerator EndGameNavigation::CoJoinGame()");
 DO_APP_FUNC(void*, AmongUsClient_CoJoinOnlineGameFromCode, (AmongUsClient* __this, int32_t gameId, bool fromEnterCode, MethodInfo* method), "Assembly-CSharp, System.Collections.IEnumerator AmongUsClient::CoJoinOnlineGameFromCode(System.Int32, System.Boolean)");
 DO_APP_FUNC(void*, AmongUsClient_CoFindGameInfoFromCodeAndJoin, (AmongUsClient* __this, int32_t gameId, MethodInfo* method), "Assembly-CSharp, System.Collections.IEnumerator AmongUsClient::CoFindGameInfoFromCodeAndJoin(System.Int32)");
+DO_APP_FUNC(void*, AmongUsClient_CoStartGameHost, (AmongUsClient* __this, MethodInfo* method), "Assembly-CSharp, System.Collections.IEnumerator AmongUsClient::CoStartGameHost()");
 DO_APP_FUNC(void*, MonoBehaviour_StartCoroutine, (MonoBehaviour* __this, void* routine, MethodInfo* method), "UnityEngine.CoreModule, UnityEngine.Coroutine UnityEngine.MonoBehaviour::StartCoroutine(System.Collections.IEnumerator)");
 DO_APP_FUNC(PlayerBodyTypes__Enum, HideAndSeekManager_GetBodyType, (HideAndSeekManager* __this, PlayerControl* player, MethodInfo* method), "Assembly-CSharp, PlayerBodyTypes HideAndSeekManager::GetBodyType(PlayerControl)");
 DO_APP_FUNC(PlayerBodyTypes__Enum, NormalGameManager_GetBodyType, (NormalGameManager* __this, PlayerControl* player, MethodInfo* method), "Assembly-CSharp, PlayerBodyTypes NormalGameManager::GetBodyType(PlayerControl)");

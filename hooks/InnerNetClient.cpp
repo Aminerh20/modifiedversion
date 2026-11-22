@@ -2317,6 +2317,9 @@ void dInnerNetClient_SetEndpoint(InnerNetClient* __this, String* addr, uint16_t 
             if (State.UseCustomServer && !State.CustomServerIp.empty()) {
                 addr = convert_to_string(State.CustomServerIp);
                 port = State.CustomServerPort;
+                if (State.CustomServerOverrideDtls) {
+                    dtls = State.CustomServerUseDtls;
+                }
             }
 
             if (State.ForceDTLS) {

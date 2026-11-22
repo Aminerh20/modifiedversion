@@ -8,6 +8,310 @@
 #include "DirectX.h"
 #include "imgui/imgui_impl_win32.h" // ImGui_ImplWin32_GetDpiScaleForHwnd
 #include "theme.hpp" // ApplyTheme
+#include "json.hpp"
+#include <cstdint>
+#include <chrono>
+#include <exception>
+#include <filesystem>
+#include <fstream>
+#include <future>
+#include <iterator>
+#include <string>
+#include <system_error>
+#include <utility>
+#include <vector>
+#include <winhttp.h>
+
+static int FilterSixLetterLobbyCode(ImGuiInputTextCallbackData* data) {
+	int selectedLength = data->SelectionEnd - data->SelectionStart;
+	if (data->BufTextLen - selectedLength >= 6 || data->EventChar < 'A' || data->EventChar > 'Z') {
+		return 1;
+	}
+	return 0;
+}
+
+namespace {
+	struct RegionEndpoint {
+		std::string regionName;
+		std::string serverName;
+		std::string host;
+		uint16_t port = 0;
+		bool useDtls = false;
+	};
+
+	static std::string GetEndpointKey(const RegionEndpoint& endpoint) {
+		return endpoint.host + "|" + std::to_string(endpoint.port);
+	}
+
+	static int FindEndpointByKey(const std::vector<RegionEndpoint>& endpoints, const std::string& key) {
+		if (key.empty()) {
+			return -1;
+		}
+		for (size_t i = 0; i < endpoints.size(); ++i) {
+			if (GetEndpointKey(endpoints[i]) == key) {
+				return static_cast<int>(i);
+			}
+		}
+		return -1;
+	}
+
+	struct RegionSyncResult {
+		std::vector<RegionEndpoint> endpoints;
+		std::string error;
+		bool success = false;
+	};
+
+	struct WinHttpHandle {
+		HINTERNET value = nullptr;
+
+		~WinHttpHandle() {
+			if (value != nullptr) {
+				WinHttpCloseHandle(value);
+			}
+		}
+	};
+
+	static std::string NormalizeServerHost(std::string address) {
+		const size_t schemeEnd = address.find("://");
+		if (schemeEnd != std::string::npos) {
+			const std::string scheme = address.substr(0, schemeEnd);
+			if (scheme != "http" && scheme != "https") {
+				return {};
+			}
+			address.erase(0, schemeEnd + 3);
+		}
+
+		const size_t pathStart = address.find_first_of("/?#");
+		if (pathStart != std::string::npos) {
+			address.resize(pathStart);
+		}
+		if (address.empty() || address.find_first_of(" \t\r\n@") != std::string::npos) {
+			return {};
+		}
+		return address;
+	}
+
+	static bool ParseRegionInfo(const std::string& contents, std::vector<RegionEndpoint>& endpoints, std::string& error) {
+		try {
+			const auto document = nlohmann::json::parse(contents);
+			if (!document.is_object() || !document.contains("Regions") || !document["Regions"].is_array()) {
+				error = "regionInfo.json has no Regions array.";
+				return false;
+			}
+
+			std::vector<RegionEndpoint> parsedEndpoints;
+			for (const auto& region : document["Regions"]) {
+				if (!region.is_object() || !region.contains("Name") || !region["Name"].is_string() ||
+					!region.contains("Servers") || !region["Servers"].is_array()) {
+					continue;
+				}
+
+				const std::string regionName = region["Name"].get<std::string>();
+				for (const auto& server : region["Servers"]) {
+					if (!server.is_object() || !server.contains("Ip") || !server["Ip"].is_string() ||
+						!server.contains("Port") || !server["Port"].is_number_integer() ||
+						!server.contains("UseDtls") || !server["UseDtls"].is_boolean()) {
+						continue;
+					}
+
+					const int port = server["Port"].get<int>();
+					const std::string host = NormalizeServerHost(server["Ip"].get<std::string>());
+					if (host.empty() || port < 1 || port > 65535) {
+						continue;
+					}
+
+					std::string serverName = "Server";
+					if (server.contains("Name") && server["Name"].is_string()) {
+						serverName = server["Name"].get<std::string>();
+					}
+					parsedEndpoints.push_back({
+						regionName,
+						serverName,
+						host,
+						static_cast<uint16_t>(port),
+						server["UseDtls"].get<bool>()
+					});
+				}
+			}
+
+			if (parsedEndpoints.empty()) {
+				error = "regionInfo.json contains no usable server endpoints.";
+				return false;
+			}
+
+			endpoints = std::move(parsedEndpoints);
+			return true;
+		}
+		catch (const nlohmann::json::exception& exception) {
+			error = std::string("Could not parse regionInfo.json: ") + exception.what();
+			return false;
+		}
+	}
+
+	static bool GetRegionInfoPath(std::filesystem::path& path, std::string& error) {
+		if (Application_get_persistentDataPath == nullptr) {
+			error = "Unity persistent-data-path binding is unavailable.";
+			return false;
+		}
+
+		String* persistentPath = Application_get_persistentDataPath(nullptr);
+		if (persistentPath == nullptr) {
+			error = "Unity returned an empty persistent-data path.";
+			return false;
+		}
+
+		const std::string pathText = convert_from_string(persistentPath);
+		if (pathText.empty()) {
+			error = "Unity returned an empty persistent-data path.";
+			return false;
+		}
+
+		path = std::filesystem::path(pathText) / "regionInfo.json";
+		return true;
+	}
+
+	static bool LoadRegionInfo(std::vector<RegionEndpoint>& endpoints, std::string& error) {
+		std::filesystem::path path;
+		if (!GetRegionInfoPath(path, error)) {
+			return false;
+		}
+
+		std::ifstream file(path, std::ios::binary);
+		if (!file) {
+			error = "No regionInfo.json found in the game's persistent-data folder. Sync AUGL's file first.";
+			return false;
+		}
+
+		std::string contents((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+		if (contents.size() > 1024 * 1024) {
+			error = "regionInfo.json exceeds the 1 MiB size limit.";
+			return false;
+		}
+		return ParseRegionInfo(contents, endpoints, error);
+	}
+
+	static bool SyncAuglRegionInfo(
+		const std::filesystem::path& path,
+		std::vector<RegionEndpoint>& endpoints,
+		std::string& error) {
+		WinHttpHandle session{ WinHttpOpen(
+			L"SickoMenu region configuration sync",
+			WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+			WINHTTP_NO_PROXY_NAME,
+			WINHTTP_NO_PROXY_BYPASS,
+			0) };
+		if (session.value == nullptr) {
+			error = "Could not initialize Windows HTTPS.";
+			return false;
+		}
+		if (!WinHttpSetTimeouts(session.value, 3000, 3000, 5000, 5000)) {
+			error = "Could not configure HTTPS timeouts.";
+			return false;
+		}
+
+		WinHttpHandle connection{ WinHttpConnect(session.value, L"augl.net", INTERNET_DEFAULT_HTTPS_PORT, 0) };
+		if (connection.value == nullptr) {
+			error = "Could not connect to augl.net.";
+			return false;
+		}
+
+		WinHttpHandle request{ WinHttpOpenRequest(
+			connection.value,
+			L"GET",
+			L"/regioninfo.json",
+			nullptr,
+			WINHTTP_NO_REFERER,
+			WINHTTP_DEFAULT_ACCEPT_TYPES,
+			WINHTTP_FLAG_SECURE) };
+		if (request.value == nullptr || !WinHttpSendRequest(
+			request.value,
+			WINHTTP_NO_ADDITIONAL_HEADERS,
+			0,
+			WINHTTP_NO_REQUEST_DATA,
+			0,
+			0,
+			0) || !WinHttpReceiveResponse(request.value, nullptr)) {
+			error = "Could not download AUGL's regionInfo.json over HTTPS.";
+			return false;
+		}
+
+		DWORD statusCode = 0;
+		DWORD statusSize = sizeof(statusCode);
+		if (!WinHttpQueryHeaders(
+			request.value,
+			WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+			WINHTTP_HEADER_NAME_BY_INDEX,
+			&statusCode,
+			&statusSize,
+			WINHTTP_NO_HEADER_INDEX) || statusCode != 200) {
+			error = "AUGL returned an unsuccessful HTTP status.";
+			return false;
+		}
+
+		std::string contents;
+		for (;;) {
+			DWORD available = 0;
+			if (!WinHttpQueryDataAvailable(request.value, &available)) {
+				error = "Could not read the AUGL response.";
+				return false;
+			}
+			if (available == 0) {
+				break;
+			}
+			if (contents.size() + available > 1024 * 1024) {
+				error = "AUGL's regionInfo.json exceeds the 1 MiB size limit.";
+				return false;
+			}
+
+			std::string chunk(available, '\0');
+			DWORD bytesRead = 0;
+			if (!WinHttpReadData(request.value, chunk.data(), available, &bytesRead)) {
+				error = "Could not read the AUGL response.";
+				return false;
+			}
+			contents.append(chunk.data(), bytesRead);
+		}
+
+		std::vector<RegionEndpoint> parsedEndpoints;
+		if (!ParseRegionInfo(contents, parsedEndpoints, error)) {
+			return false;
+		}
+
+		std::error_code fileError;
+		std::filesystem::create_directories(path.parent_path(), fileError);
+		if (fileError) {
+			error = std::string("Could not create the game's persistent-data folder: ") + fileError.message();
+			return false;
+		}
+
+		const std::filesystem::path temporaryPath = path.wstring() + L".tmp";
+		{
+			std::ofstream file(temporaryPath, std::ios::binary | std::ios::trunc);
+			if (!file) {
+				error = "Could not open a temporary regionInfo.json file for writing.";
+				return false;
+			}
+			file.write(contents.data(), static_cast<std::streamsize>(contents.size()));
+			file.flush();
+			if (!file) {
+				error = "Could not write the downloaded regionInfo.json.";
+				return false;
+			}
+		}
+
+		if (!MoveFileExW(
+			temporaryPath.c_str(),
+			path.c_str(),
+			MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+			std::filesystem::remove(temporaryPath, fileError);
+			error = "Could not replace the game's regionInfo.json file.";
+			return false;
+		}
+
+		endpoints = std::move(parsedEndpoints);
+		return true;
+	}
+}
 
 namespace SettingsTab {
 	enum Groups {
@@ -477,13 +781,76 @@ namespace SettingsTab {
 
 			if (State.UseCustomServer) {
 				static char ipBuffer[128] = "";
+				static std::vector<RegionEndpoint> regionEndpoints;
+				static bool triedLoadingRegionInfo = false;
+				static bool triedResolvingRegionInfoPath = false;
+				static int selectedEndpoint = -1;
+				static std::string regionInfoStatus;
+				static std::string regionInfoPathDisplay;
+				static std::future<RegionSyncResult> regionSyncFuture;
+				static bool regionSyncPending = false;
 
 				if (ipBuffer[0] == '\0' && !State.CustomServerIp.empty()) {
 					strncpy_s(ipBuffer, State.CustomServerIp.c_str(), sizeof(ipBuffer));
 				}
 
+				if (!triedResolvingRegionInfoPath) {
+					triedResolvingRegionInfoPath = true;
+					std::filesystem::path path;
+					std::string error;
+					if (GetRegionInfoPath(path, error)) {
+						regionInfoPathDisplay = path.string();
+					}
+				}
+
+				if (!triedLoadingRegionInfo) {
+					triedLoadingRegionInfo = true;
+					if (LoadRegionInfo(regionEndpoints, regionInfoStatus)) {
+						selectedEndpoint = FindEndpointByKey(regionEndpoints, State.CustomServerEndpointKey);
+						regionInfoStatus = "Loaded " + std::to_string(regionEndpoints.size()) +
+							" servers from the game's regionInfo.json.";
+						if (!State.CustomServerEndpointKey.empty() && selectedEndpoint == -1) {
+							regionInfoStatus += " The saved endpoint is no longer available; select another server.";
+						}
+					}
+					else {
+						regionInfoStatus = "Could not load local regionInfo.json: " + regionInfoStatus;
+					}
+				}
+
+				if (regionSyncPending &&
+					regionSyncFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+					regionSyncPending = false;
+					try {
+						const RegionSyncResult result = regionSyncFuture.get();
+						if (result.success) {
+							regionEndpoints = result.endpoints;
+							selectedEndpoint = FindEndpointByKey(regionEndpoints, State.CustomServerEndpointKey);
+							regionInfoStatus = "AUGL regionInfo.json downloaded and saved.";
+							if (selectedEndpoint == -1) {
+								regionInfoStatus += State.CustomServerEndpointKey.empty()
+									? " Select a server below."
+									: " The saved endpoint is no longer available; select another server.";
+							}
+						}
+						else {
+							regionInfoStatus = result.error;
+						}
+					}
+					catch (const std::exception& exception) {
+						regionInfoStatus = std::string("AUGL regionInfo.json sync failed: ") + exception.what();
+					}
+					catch (...) {
+						regionInfoStatus = "AUGL regionInfo.json sync failed with an unexpected error.";
+					}
+				}
+
 				if (ImGui::InputText("Server IP", ipBuffer, sizeof(ipBuffer))) {
 					State.CustomServerIp = ipBuffer;
+					State.CustomServerOverrideDtls = false;
+					State.CustomServerEndpointKey.clear();
+					State.Save();
+					selectedEndpoint = -1;
 				}
 
 				int port = static_cast<int>(State.CustomServerPort);
@@ -491,6 +858,266 @@ namespace SettingsTab {
 					if (port < 1) port = 1;
 					if (port > 65535) port = 65535;
 					State.CustomServerPort = static_cast<uint16_t>(port);
+					State.CustomServerOverrideDtls = false;
+					State.CustomServerEndpointKey.clear();
+					State.Save();
+					selectedEndpoint = -1;
+				}
+
+				if (ImGui::Button("Use AUGL Server (augl.net:443)")) {
+					strncpy_s(ipBuffer, "augl.net", sizeof(ipBuffer));
+					State.CustomServerIp = ipBuffer;
+					State.CustomServerPort = 443;
+					State.CustomServerUseDtls = false;
+					State.CustomServerOverrideDtls = true;
+					State.ForceDTLS = false;
+					selectedEndpoint = -1;
+					for (size_t i = 0; i < regionEndpoints.size(); ++i) {
+						if (regionEndpoints[i].host == "augl.net" && regionEndpoints[i].port == 443) {
+							selectedEndpoint = static_cast<int>(i);
+							break;
+						}
+					}
+					if (selectedEndpoint == -1) {
+						regionEndpoints.push_back({ "AUGL", "Http-1", "augl.net", 443, false });
+						selectedEndpoint = static_cast<int>(regionEndpoints.size() - 1);
+					}
+					State.CustomServerEndpointKey = GetEndpointKey(regionEndpoints[selectedEndpoint]);
+					State.Save();
+				}
+
+				if (regionSyncPending) {
+					ImGui::TextDisabled("Downloading AUGL regionInfo.json...");
+				}
+				else if (ImGui::Button("Download / Sync AUGL regionInfo.json")) {
+					std::filesystem::path path;
+					std::string error;
+					if (!GetRegionInfoPath(path, error)) {
+						regionInfoStatus = error;
+					}
+					else {
+						try {
+							regionSyncFuture = std::async(std::launch::async, [path]() {
+								RegionSyncResult result;
+								try {
+									result.success = SyncAuglRegionInfo(path, result.endpoints, result.error);
+								}
+								catch (const std::filesystem::filesystem_error& exception) {
+									result.error = std::string("Could not save regionInfo.json: ") + exception.what();
+								}
+								return result;
+							});
+							regionSyncPending = true;
+							regionInfoStatus = "AUGL regionInfo.json sync started.";
+						}
+						catch (const std::system_error& exception) {
+							regionInfoStatus = std::string("Could not start regionInfo.json sync: ") + exception.what();
+						}
+					}
+				}
+				ImGui::TextWrapped("%s", regionInfoStatus.c_str());
+				if (!regionInfoPathDisplay.empty()) {
+					ImGui::TextWrapped("File path: %s", regionInfoPathDisplay.c_str());
+				}
+
+				if (!regionEndpoints.empty()) {
+					std::string selectedLabel = "Select a region server";
+					if (selectedEndpoint >= 0 && selectedEndpoint < static_cast<int>(regionEndpoints.size())) {
+						const auto& selected = regionEndpoints[selectedEndpoint];
+						selectedLabel = selected.regionName + " / " + selected.serverName + " (" +
+							selected.host + ":" + std::to_string(selected.port) + ")";
+					}
+
+					if (ImGui::BeginCombo("Region server", selectedLabel.c_str())) {
+						for (size_t i = 0; i < regionEndpoints.size(); ++i) {
+							const auto& endpoint = regionEndpoints[i];
+							const std::string label = endpoint.regionName + " / " + endpoint.serverName + " (" +
+								endpoint.host + ":" + std::to_string(endpoint.port) +
+								(endpoint.useDtls ? ", DTLS" : ", no DTLS") + ")";
+							const bool isSelected = selectedEndpoint == static_cast<int>(i);
+							if (ImGui::Selectable(label.c_str(), isSelected)) {
+								selectedEndpoint = static_cast<int>(i);
+								strncpy_s(ipBuffer, endpoint.host.c_str(), sizeof(ipBuffer));
+								State.UseCustomServer = true;
+								State.CustomServerIp = endpoint.host;
+								State.CustomServerPort = endpoint.port;
+								State.CustomServerUseDtls = endpoint.useDtls;
+								State.CustomServerOverrideDtls = true;
+								State.CustomServerEndpointKey = GetEndpointKey(endpoint);
+								State.ForceDTLS = false;
+								State.Save();
+							}
+							if (isSelected) {
+								ImGui::SetItemDefaultFocus();
+							}
+						}
+						ImGui::EndCombo();
+					}
+				}
+				else {
+					ImGui::TextDisabled("Sync the config to load its region servers.");
+				}
+
+				bool codeChanged = InputString(
+					"Lobby code / suffix preview",
+					&State.CustomHostCode,
+					ImGuiInputTextFlags_CharsUppercase | ImGuiInputTextFlags_CharsNoBlank |
+					ImGuiInputTextFlags_CallbackCharFilter,
+					FilterSixLetterLobbyCode);
+				bool validCode = State.CustomHostCode.size() == 4 || State.CustomHostCode.size() == 6;
+				for (const char c : State.CustomHostCode) {
+					if (c < 'A' || c > 'Z') {
+						validCode = false;
+						break;
+					}
+				}
+				if (validCode) {
+					State.CustomHostTargetSuffix = State.CustomHostCode.size() == 6
+						? State.CustomHostCode.substr(2)
+						: State.CustomHostCode;
+					ImGui::Text("Target suffix: %s", State.CustomHostTargetSuffix.c_str());
+					if (State.CustomHostCode.size() == 6 && GameCode_GameNameToInt != nullptr &&
+						InnerNet_GameCode_IntToGameName != nullptr) {
+						State.CustomHostGameId = GameCode_GameNameToInt(
+							convert_to_string(State.CustomHostCode), nullptr);
+						String* roundTrip = InnerNet_GameCode_IntToGameName(State.CustomHostGameId, nullptr);
+						if (roundTrip != nullptr) {
+							const std::string decodedCode = convert_from_string(roundTrip);
+							ImGui::Text("Code conversion: %d -> %s", State.CustomHostGameId, decodedCode.c_str());
+							if (decodedCode != State.CustomHostCode) {
+								ImGui::TextDisabled("Code conversion did not round-trip.");
+							}
+						}
+						else {
+							ImGui::TextDisabled("Could not decode the converted code.");
+						}
+					}
+					else {
+						State.CustomHostGameId = 0;
+					}
+				}
+				else {
+					State.CustomHostTargetSuffix.clear();
+					State.CustomHostGameId = 0;
+					ImGui::TextDisabled("Enter 4 or 6 uppercase letters to preview the suffix.");
+				}
+				if (codeChanged) {
+					State.Save();
+				}
+				ImGui::TextWrapped(
+					"AUGL's regionInfo.json has no room-code suffix mapping. The selected server is used; "
+					"the server assigns the hosted lobby code.");
+
+				static std::string joinStatus;
+				if (ImGui::Button("Join Room by Code")) {
+					String* roundTrip = nullptr;
+					if (validCode && State.CustomHostCode.size() == 6 &&
+						GameCode_GameNameToInt != nullptr && InnerNet_GameCode_IntToGameName != nullptr) {
+						roundTrip = InnerNet_GameCode_IntToGameName(State.CustomHostGameId, nullptr);
+					}
+					const bool validGameId = State.CustomHostGameId != 0 && roundTrip != nullptr &&
+						convert_from_string(roundTrip) == State.CustomHostCode;
+
+					if (selectedEndpoint < 0 || selectedEndpoint >= static_cast<int>(regionEndpoints.size())) {
+						joinStatus = "Select a server from the loaded regionInfo.json first.";
+					}
+					else if (!validGameId) {
+						joinStatus = "Enter a valid 6-letter code that converts and round-trips correctly.";
+					}
+					else if (IsInGame() || IsInLobby()) {
+						joinStatus = "Leave the current game or lobby before joining by code.";
+					}
+					else if (AmongUsClient_CoJoinOnlineGameFromCode == nullptr ||
+						MonoBehaviour_StartCoroutine == nullptr || Game::pAmongUsClient == nullptr ||
+						*Game::pAmongUsClient == nullptr) {
+						joinStatus = "The game's standard join-by-code flow is unavailable.";
+					}
+					else {
+						const auto& endpoint = regionEndpoints[selectedEndpoint];
+						State.UseCustomServer = true;
+						strncpy_s(ipBuffer, endpoint.host.c_str(), sizeof(ipBuffer));
+						State.CustomServerIp = endpoint.host;
+						State.CustomServerPort = endpoint.port;
+						State.CustomServerUseDtls = endpoint.useDtls;
+						State.CustomServerOverrideDtls = true;
+						State.CustomServerEndpointKey = GetEndpointKey(endpoint);
+						State.ForceDTLS = false;
+						State.Save();
+
+						auto client = *Game::pAmongUsClient;
+						void* joinRoutine = AmongUsClient_CoJoinOnlineGameFromCode(
+							client, State.CustomHostGameId, true, nullptr);
+						if (joinRoutine != nullptr) {
+							MonoBehaviour_StartCoroutine((MonoBehaviour*)client, joinRoutine, nullptr);
+							joinStatus = "Starting the standard join-by-code flow for " + State.CustomHostCode + ".";
+						}
+						else {
+							joinStatus = "The game's join-by-code flow returned no routine.";
+						}
+					}
+				}
+				if (!joinStatus.empty()) {
+					ImGui::TextWrapped("%s", joinStatus.c_str());
+				}
+
+				static std::string hostStatus;
+				if (ImGui::Button("Host on selected server (single attempt)")) {
+					if (selectedEndpoint < 0 || selectedEndpoint >= static_cast<int>(regionEndpoints.size())) {
+						hostStatus = "Select a server from the loaded regionInfo.json first.";
+					}
+					else if (IsInGame() || IsInLobby()) {
+						hostStatus = "Leave the current game or lobby before hosting.";
+					}
+					else if (AmongUsClient_CoStartGameHost == nullptr || MonoBehaviour_StartCoroutine == nullptr ||
+						Game::pAmongUsClient == nullptr || *Game::pAmongUsClient == nullptr) {
+						hostStatus = "The game's standard host flow is unavailable.";
+					}
+					else {
+						const auto& endpoint = regionEndpoints[selectedEndpoint];
+						State.UseCustomServer = true;
+						strncpy_s(ipBuffer, endpoint.host.c_str(), sizeof(ipBuffer));
+						State.CustomServerIp = endpoint.host;
+						State.CustomServerPort = endpoint.port;
+						State.CustomServerUseDtls = endpoint.useDtls;
+						State.CustomServerOverrideDtls = true;
+						State.CustomServerEndpointKey = GetEndpointKey(endpoint);
+						State.ForceDTLS = false;
+						State.Save();
+
+						auto client = *Game::pAmongUsClient;
+						auto hostRoutine = AmongUsClient_CoStartGameHost(client, NULL);
+						if (hostRoutine != nullptr) {
+							MonoBehaviour_StartCoroutine((MonoBehaviour*)client, hostRoutine, NULL);
+							hostStatus = "Starting a standard lobby on the selected server. It will assign the code.";
+						}
+						else {
+							hostStatus = "The game's standard host flow returned no routine.";
+						}
+					}
+				}
+				if (!hostStatus.empty()) {
+					ImGui::TextWrapped("%s", hostStatus.c_str());
+				}
+
+				if (IsInLobby() && Game::pAmongUsClient != nullptr && *Game::pAmongUsClient != nullptr &&
+					InnerNet_GameCode_IntToGameName != nullptr) {
+					const int32_t currentGameId = (*Game::pAmongUsClient)->fields._.GameId;
+					if (currentGameId != 0) {
+						String* currentCode = InnerNet_GameCode_IntToGameName(currentGameId, nullptr);
+						const std::string lobbyCode = currentCode != nullptr
+							? convert_from_string(currentCode)
+							: std::string();
+						if (!lobbyCode.empty()) {
+							ImGui::Text("Current lobby code: %s", lobbyCode.c_str());
+							if (State.CustomHostTargetSuffix.size() == 4 && lobbyCode.size() >= 4) {
+								const bool matches = lobbyCode.substr(lobbyCode.size() - 4) ==
+									State.CustomHostTargetSuffix;
+								ImGui::TextColored(
+									matches ? ImVec4(0.2f, 0.9f, 0.3f, 1.f) : ImVec4(1.f, 0.25f, 0.25f, 1.f),
+									"%s", matches ? "MATCH" : "NO MATCH");
+							}
+						}
+					}
 				}
 			}
 

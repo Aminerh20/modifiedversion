@@ -117,6 +117,12 @@ void Settings::Load() {
         JSON_TRYGET("FakePlName", this->FakePlName);
         JSON_TRYGET("CustomServerIp", this->CustomServerIp);
         JSON_TRYGET("CustomServerPort", this->CustomServerPort);
+        JSON_TRYGET("CustomServerEndpointKey", this->CustomServerEndpointKey);
+        JSON_TRYGET("CustomHostCode", this->CustomHostCode);
+        JSON_TRYGET("CustomHostGameId", this->CustomHostGameId);
+        JSON_TRYGET("CustomHostTargetSuffix", this->CustomHostTargetSuffix);
+        JSON_TRYGET("CustomServerUseDtls", this->CustomServerUseDtls);
+        JSON_TRYGET("CustomServerOverrideDtls", this->CustomServerOverrideDtls);
         JSON_TRYGET("ForceDTLS", this->ForceDTLS);
         JSON_TRYGET("SpoofGuestAccount", this->SpoofGuestAccount);
         // JSON_TRYGET("SpoofAUVersion_", this->SpoofAUVersion); // putting an underscore to reset version spoofing, remove to reset again
@@ -848,6 +854,12 @@ void Settings::Save() {
                 { "UseCustomServer", this->UseCustomServer},
                 { "CustomServerIp", this->CustomServerIp},
                 { "CustomServerPort", this->CustomServerPort},
+                { "CustomServerEndpointKey", this->CustomServerEndpointKey},
+                { "CustomHostCode", this->CustomHostCode},
+                { "CustomHostGameId", this->CustomHostGameId},
+                { "CustomHostTargetSuffix", this->CustomHostTargetSuffix},
+                { "CustomServerUseDtls", this->CustomServerUseDtls},
+                { "CustomServerOverrideDtls", this->CustomServerOverrideDtls},
                 { "ForceDTLS", this->ForceDTLS},
 
                 { "SpoofGuestAccount", this->SpoofGuestAccount },

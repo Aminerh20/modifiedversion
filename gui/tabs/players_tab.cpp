@@ -266,7 +266,7 @@ namespace PlayersTab {
 
     static int GetMatchCycleTeamCap(size_t nonHostParticipants) {
         if (nonHostParticipants >= 8) return 4;
-        if (nonHostParticipants >= 7) return 3;
+        if (nonHostParticipants >= 6) return 3;
         if (nonHostParticipants >= 4) return 2;
         if (nonHostParticipants >= 1) return 1;
         return 0;
@@ -1159,6 +1159,26 @@ namespace PlayersTab {
             }
             else {
                 selectImpostors(true);
+            }
+            for (size_t offset = 0;
+                offset < nonHostPlayers.size()
+                && impostors.size() < static_cast<size_t>(teamCap);
+                ++offset) {
+                const size_t index = (startIndex + offset) % nonHostPlayers.size();
+                auto player = nonHostPlayers[index];
+                const auto playerId = player->fields.PlayerId;
+                const auto tracked = xpTrackedPlayers.find(playerId);
+                const bool alreadySelected = std::any_of(
+                    impostors.begin(), impostors.end(), [playerId](PlayerControl* selected) {
+                        return selected->fields.PlayerId == playerId;
+                    });
+                if (tracked == xpTrackedPlayers.end()
+                    || alreadySelected
+                    || xpFarmingCompletedPlayerIds.contains(playerId)
+                    || tracked->second.has_completed_objective
+                    || xpDeferredFarmingRetryIds.contains(playerId)) continue;
+                impostors.push_back(player);
+                lastSelectedIndex = index;
             }
         }
         else if (xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP
