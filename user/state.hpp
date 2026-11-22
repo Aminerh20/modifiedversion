@@ -86,6 +86,7 @@ public:
     bool SpoofAUVersion = false;
     int FakeAUVersion = 1;
     bool DisableAnimations = false;
+    bool Moonwalk = false;
     bool ClickThroughMenuUI = false;
     bool ShowUiBorders = true;
     float AnimationSpeed = 1.f;

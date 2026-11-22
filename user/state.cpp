@@ -70,6 +70,7 @@ void Settings::Load() {
         JSON_TRYGET("MatchBackgroundWithTheme", this->MatchBackgroundWithTheme);
         JSON_TRYGET("SetName", this->SetName);
         JSON_TRYGET("LightMode", this->LightMode);
+        JSON_TRYGET("Moonwalk", this->Moonwalk);
         JSON_TRYGET("MenuThemeColor_R", this->MenuThemeColor.x);
         JSON_TRYGET("MenuThemeColor_G", this->MenuThemeColor.y);
         JSON_TRYGET("MenuThemeColor_B", this->MenuThemeColor.z);
@@ -809,6 +810,7 @@ void Settings::Save() {
                 { "MatchBackgroundWithTheme", this->MatchBackgroundWithTheme },
                 { "SetName", this->SetName },
                 { "LightMode", this->LightMode },
+                { "Moonwalk", this->Moonwalk },
                 { "MenuThemeColor_R", this->MenuThemeColor.x },
                 { "MenuThemeColor_G", this->MenuThemeColor.y },
                 { "MenuThemeColor_B", this->MenuThemeColor.z },

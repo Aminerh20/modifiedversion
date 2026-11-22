@@ -74,6 +74,7 @@
     </ClCompile>
     <ClCompile Include="gui\replay.cpp" />
     <ClCompile Include="gui\tabs\about_tab.cpp" />
+    <ClCompile Include="gui\tabs\animations_tab.cpp" />
     <ClCompile Include="gui\tabs\debug_tab.cpp" />
     <ClCompile Include="gui\tabs\doors_tab.cpp" />
     <ClCompile Include="gui\tabs\esp_tab.cpp" />
@@ -109,6 +110,7 @@
     <ClCompile Include="rpc\CmdCheckMurder.cpp" />
     <ClCompile Include="rpc\CustomRpcHandler.cpp" />
     <ClCompile Include="rpc\RpcPlayerAppearance.cpp" />
+    <ClCompile Include="rpc\RpcPetPlayer.cpp" />
     <ClCompile Include="rpc\RpcSetRole.cpp" />
     <ClCompile Include="rpc\RpcUsePlatform.cpp" />
     <ClCompile Include="user\achievements.cpp" />
@@ -546,6 +548,7 @@
     <ClInclude Include="gui\Renderer.hpp" />
     <ClInclude Include="gui\replay.hpp" />
     <ClInclude Include="gui\tabs\about_tab.h" />
+    <ClInclude Include="gui\tabs\animations_tab.h" />
     <ClInclude Include="gui\tabs\debug_tab.h" />
     <ClInclude Include="gui\tabs\doors_tab.h" />
     <ClInclude Include="gui\tabs\esp_tab.h" />

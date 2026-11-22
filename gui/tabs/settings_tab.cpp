@@ -561,7 +561,9 @@ namespace SettingsTab {
 				State.Save();
 			}
 
-			SteppedSliderFloat("Opacity", (float*)&State.MenuThemeColor.w, 0.1f, 1.f, 0.01f, "%.2f", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_NoInput);
+			if (SteppedSliderFloat("Opacity", (float*)&State.MenuThemeColor.w, 0.1f, 1.f, 0.01f, "%.2f", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_NoInput)) {
+				State.Save();
+			}
 
 			ImGui::Dummy(ImVec2(4, 4) * State.dpiScale);
 

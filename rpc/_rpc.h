@@ -132,6 +132,13 @@ public:
 	virtual void Process() override;
 };
 
+class RpcPetPlayer : public RPCInterface {
+	PlayerControl* Player;
+public:
+	RpcPetPlayer(PlayerControl* player);
+	virtual void Process() override;
+};
+
 class RpcSetScanner : public RPCInterface {
 	bool playAnimation;
 public:

@@ -97,6 +97,18 @@ void dPlayerPhysics_RpcExitVent(PlayerPhysics* __this, int32_t id, MethodInfo* m
 	PlayerPhysics_RpcExitVent(__this, id, method);
 }
 
+void dPlayerPhysics_HandleAnimation(PlayerPhysics* __this, MethodInfo* method)
+{
+	auto localPlayer = *Game::pLocalPlayer;
+	if (!State.PanicMode && State.Moonwalk && __this != nullptr &&
+		localPlayer != nullptr && __this->fields.myPlayer == localPlayer) {
+		PlayerPhysics_ResetAnimState(__this, NULL);
+		return;
+	}
+
+	PlayerPhysics_HandleAnimation(__this, method);
+}
+
 void dPlayerPhysics_BootFromVent(PlayerPhysics* __this, int32_t ventId, MethodInfo* method) {
 	if (State.ShowHookLogs) Log.HookDebug("Hook dPlayerPhysics_FixedUpdate executed", false);
 

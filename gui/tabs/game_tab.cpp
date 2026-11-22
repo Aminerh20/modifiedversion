@@ -97,9 +97,6 @@ namespace GameTab {
         ImGui::BeginChild("###Game", ImVec2(500 * State.dpiScale, 0), true, ImGuiWindowFlags_NoBackground);
         if (openGeneral) {
             ImGui::Dummy(ImVec2(2, 2) * State.dpiScale);
-            if (SteppedSliderFloat("Player Speed Multiplier", &State.PlayerSpeed, 0.f, 10.f, 0.05f, "%.2fx", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_NoInput)) {
-                State.PrevPlayerSpeed = State.PlayerSpeed;
-            }
             if (SteppedSliderFloat("Kill Distance", &State.KillDistance, 0.f, 20.f, 0.1f, "%.1f m", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_NoInput)) {
                 State.PrevKillDistance = State.KillDistance;
             }
@@ -111,10 +108,6 @@ namespace GameTab {
                 State.Save();
             }
             ImGui::SameLine();*/
-            if (ToggleButton("Multiply Speed", &State.MultiplySpeed)) {
-                State.Save();
-            }
-            ImGui::SameLine();
             if (ToggleButton("Modify Kill Distance", &State.ModifyKillDistance)) {
                 State.Save();
             }

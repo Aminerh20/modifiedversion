@@ -3287,11 +3287,13 @@ namespace PlayersTab {
 
     enum Groups {
         Player,
+        Social,
         Trolling,
         Info,
     };
 
     static bool openPlayer = true;
+    static bool openSocial = false;
     static bool openTrolling = false;
     static bool openInfo = false;
 
@@ -3302,12 +3304,14 @@ namespace PlayersTab {
 
     void CloseOtherGroups(Groups group) {
         openPlayer = group == Groups::Player;
+        openSocial = group == Groups::Social;
         openTrolling = group == Groups::Trolling;
         openInfo = group == Groups::Info;
     }
 
     void OpenSubGroup(const std::string& name) {
         if (name == "Player") CloseOtherGroups(Groups::Player);
+        else if (name == "Social") CloseOtherGroups(Groups::Social);
         else if (name == "Trolling") CloseOtherGroups(Groups::Trolling);
         else if (name == "Info" && (IsInMultiplayerGame() || IsInLobby())) CloseOtherGroups(Groups::Info);
     }
@@ -4160,6 +4164,10 @@ namespace PlayersTab {
                         CloseOtherGroups(Groups::Player);
                     }
                     ImGui::SameLine();
+                    if (TabGroup("Social", openSocial)) {
+                        CloseOtherGroups(Groups::Social);
+                    }
+                    ImGui::SameLine();
                     if (TabGroup("Trolling", openTrolling)) {
                         CloseOtherGroups(Groups::Trolling);
                     }
@@ -4919,22 +4927,6 @@ namespace PlayersTab {
                                 queue = &State.lobbyRpcQueue;
 
                             if (!selectedPlayer.is_LocalPlayer()) {
-                                if (!State.activeImpersonation && AnimatedButton(!State.SafeMode ? "Impersonate" : "Copy Outfit")) {
-                                    if (queue != nullptr) {
-                                        if (IsHost() || !State.SafeMode)
-                                            queue->push(new RpcForceColor(*Game::pLocalPlayer, colorId));
-                                        else
-                                            queue->push(new RpcSetColor(GetRandomColorId()));
-                                        queue->push(new RpcSetPet(petId));
-                                        queue->push(new RpcSetSkin(skinId));
-                                        queue->push(new RpcSetVisor(visorId));
-                                        queue->push(new RpcSetHat(hatId));
-                                        queue->push(new RpcSetNamePlate(namePlateId));
-                                        if (!State.SafeMode) ImpersonateName(selectedPlayer.get_PlayerData());
-                                        queue->push(new RpcSetLevel(*Game::pLocalPlayer, selectedPlayer.get_PlayerData()->fields.PlayerLevel));
-                                        State.activeImpersonation = true;
-                                    }
-                                }
                                 ImGui::SetNextItemWidth(300 * State.dpiScale);
                                 if (ImGui::CollapsingHeader("Cosmetics Stealer")) {
                                     if (!State.SafeMode) {
@@ -5022,14 +5014,6 @@ namespace PlayersTab {
                                 queue->push(new RpcSetLevel(p, selectedPlayer.get_PlayerData()->fields.PlayerLevel));
                                 State.activeImpersonation = true;
                             }
-                        }
-                    }
-
-                    if (State.activeImpersonation)
-                    {
-                        if (AnimatedButton(!State.SafeMode ? "Reset Impersonation" : "Reset Original Outfit"))
-                        {
-                            ControlAppearance(false);
                         }
                     }
 
@@ -5464,21 +5448,6 @@ namespace PlayersTab {
                     }
 
                     if (State.selectedPlayers.size() == 1) {
-                        if ((IsInGame() || IsInLobby()) && !selectedPlayer.is_Disconnected() && !selectedPlayer.is_LocalPlayer())
-                        {
-                            if (State.playerToWhisper.equals(State.selectedPlayer) && State.activeWhisper) {
-                                if (AnimatedButton("Stop Whispering To")) {
-                                    State.playerToWhisper = {};
-                                    State.activeWhisper = false;
-                                }
-                            }
-                            else {
-                                if (AnimatedButton("Whisper To")) {
-                                    State.playerToWhisper = State.selectedPlayer;
-                                    State.activeWhisper = true;
-                                }
-                            }
-                        }
                         //we have to send these rpc messages as ourselves since anticheat only allows you to send rpcs with your own net id
                         /*if (AnimatedButton(!State.SafeMode ? "Force AUM Detection" : "Fake AUM Detection")) {
                             if (IsInGame()) State.rpcQueue.push(new RpcForceDetectAum(selectedPlayer, !State.SafeMode));
@@ -5513,6 +5482,60 @@ namespace PlayersTab {
                         }
                     }
                 }
+                if (openSocial && selectedPlayer.has_value() && selectedPlayers.size() == 1 &&
+                    !selectedPlayer.is_Disconnected() && !selectedPlayer.get_PlayerControl()->fields.notRealPlayer) {
+                    if (State.activeImpersonation && AnimatedButton(!State.SafeMode ? "Reset Impersonation" : "Reset Original Outfit")) {
+                        ControlAppearance(false);
+                    }
+
+                    if (!selectedPlayer.is_LocalPlayer()) {
+                        auto outfit = GetPlayerOutfit(selectedPlayer.get_PlayerData());
+                        if (outfit != nullptr) {
+                            std::queue<RPCInterface*>* queue = IsInGame() ? &State.rpcQueue :
+                                IsInLobby() ? &State.lobbyRpcQueue : nullptr;
+
+                            if (!State.activeImpersonation && AnimatedButton(!State.SafeMode ? "Copy Avatar" : "Copy Outfit") && queue != nullptr) {
+                                if (IsHost() || !State.SafeMode)
+                                    queue->push(new RpcForceColor(*Game::pLocalPlayer, outfit->fields.ColorId));
+                                else
+                                    queue->push(new RpcSetColor(GetRandomColorId()));
+                                queue->push(new RpcSetPet(outfit->fields.PetId));
+                                queue->push(new RpcSetSkin(outfit->fields.SkinId));
+                                queue->push(new RpcSetVisor(outfit->fields.VisorId));
+                                queue->push(new RpcSetHat(outfit->fields.HatId));
+                                queue->push(new RpcSetNamePlate(outfit->fields.NamePlateId));
+                                if (!State.SafeMode) ImpersonateName(selectedPlayer.get_PlayerData());
+                                queue->push(new RpcSetLevel(*Game::pLocalPlayer, selectedPlayer.get_PlayerData()->fields.PlayerLevel));
+                                State.activeImpersonation = true;
+                            }
+                        }
+
+                        auto localPlayer = *Game::pLocalPlayer;
+                        if (localPlayer != nullptr && localPlayer->fields.cosmetics != nullptr &&
+                            localPlayer->fields.cosmetics->fields.currentPet != nullptr) {
+                            std::queue<RPCInterface*>* queue = IsInGame() ? &State.rpcQueue :
+                                IsInLobby() ? &State.lobbyRpcQueue : nullptr;
+                            if (queue != nullptr && AnimatedButton("Pet Player")) {
+                                queue->push(new RpcPetPlayer(selectedPlayer.get_PlayerControl()));
+                            }
+                        }
+                        else {
+                            ImGui::TextDisabled("Equip a pet to use Pet Player.");
+                        }
+
+                        if ((IsInGame() || IsInLobby()) && State.playerToWhisper.equals(State.selectedPlayer) && State.activeWhisper) {
+                            if (AnimatedButton("Stop Whispering To")) {
+                                State.playerToWhisper = {};
+                                State.activeWhisper = false;
+                            }
+                        }
+                        else if ((IsInGame() || IsInLobby()) && AnimatedButton("Whisper To")) {
+                            State.playerToWhisper = State.selectedPlayer;
+                            State.activeWhisper = true;
+                        }
+                    }
+                }
+
                 if (openInfo && selectedPlayer.has_value() && selectedPlayers.size() == 1 && !selectedPlayer.get_PlayerControl()->fields.notRealPlayer) {
                     ImGui::Dummy(ImVec2(3, 3) * State.dpiScale);
                     if (AnimatedButton("Steal Data")) {

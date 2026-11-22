@@ -28,6 +28,9 @@
     <ClCompile Include="gui\tabs\about_tab.cpp">
       <Filter>gui\tabs</Filter>
     </ClCompile>
+    <ClCompile Include="gui\tabs\animations_tab.cpp">
+      <Filter>gui\tabs</Filter>
+    </ClCompile>
     <ClCompile Include="gui\tabs\debug_tab.cpp">
       <Filter>gui\tabs</Filter>
     </ClCompile>
@@ -42,6 +45,9 @@
     </ClCompile>
     <ClCompile Include="gui\tabs\players_tab.cpp">
       <Filter>gui\tabs</Filter>
+    </ClCompile>
+    <ClCompile Include="rpc\RpcPetPlayer.cpp">
+      <Filter>rpc</Filter>
     </ClCompile>
     <ClCompile Include="gui\tabs\sabotage_tab.cpp">
       <Filter>gui\tabs</Filter>
@@ -520,6 +526,9 @@
       <Filter>user</Filter>
     </ClInclude>
     <ClInclude Include="gui\tabs\about_tab.h">
+      <Filter>gui\tabs</Filter>
+    </ClInclude>
+    <ClInclude Include="gui\tabs\animations_tab.h">
       <Filter>gui\tabs</Filter>
     </ClInclude>
     <ClInclude Include="user\state.hpp">

@@ -2,10 +2,10 @@
 
 namespace Menu {
 	enum Tabs {
-		About,
 		Settings,
 		Game,
 		Self,
+		Animations,
 		Radar,
 		Replay,
 		Esp,
@@ -20,4 +20,3 @@ namespace Menu {
 	void Init();
 	void Render();
 }
-

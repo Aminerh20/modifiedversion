@@ -1,7 +1,7 @@
 #include "pch-il2cpp.h"
 #include "menu.hpp"
 #include "imgui/imgui.h"
-#include "tabs/about_tab.h"
+#include "tabs/animations_tab.h"
 #include "tabs/doors_tab.h"
 #include "tabs/game_tab.h"
 #include "tabs/host_tab.h"
@@ -20,10 +20,10 @@
 #include "gui-helpers.hpp"
 
 namespace Menu {
-	static bool openAbout = false;
 	static bool openSettings = false;
 	static bool openGame = false;
 	static bool openSelf = false;
+	static bool openAnimations = false;
 	static bool openRadar = false;
 	static bool openReplay = false;
 	static bool openEsp = false;
@@ -79,8 +79,7 @@ namespace Menu {
 			{"Complete All Tasks", "Keybinds"}, {"Cancel Start Game", "Keybinds"}
 		}},
 		{"Game", {
-			{"Player Speed Multiplier", "General"}, {"Kill Distance", "General"},
-			{"Multiply Speed", "General"}, {"Modify Kill Distance", "General"}, {"Random Color", "General"},
+			{"Kill Distance", "General"}, {"Modify Kill Distance", "General"}, {"Random Color", "General"},
 			{"Set Color", "General"}, {"Snipe Color", "General"}, {"Console", "General"},
 			{"Reset Appearance", "General"}, {"Kill Everyone", "General"}, {"Protect Everyone", "General"},
 			{"Disable Venting", "General"}, {"Pause Vent Blocking While Venting", "General"},
@@ -149,6 +148,9 @@ namespace Menu {
 			{"Resist Votekicks Against Self", "Anti-Exploit"}, {"Prevent Attempt to Crash Lobby", "Anti-Exploit"},
 			{"Text Editor", "Text Editor"}
 		}},
+		{"Animations", {
+			{"Moonwalk", ""}, {"Player Speed Multiplier", ""}, {"Multiply Speed", ""}
+		}},
 		{"Radar", {
 			{"Show Radar", ""}, {"Show Dead Bodies", ""}, {"Show Ghosts", ""},
 			{"Right Click to Teleport", ""}, {"(Shift + Left Click) to Close Room Door", ""},
@@ -181,7 +183,7 @@ namespace Menu {
 			{"Spam Teleport to Vent", "Player"}, {"Spam Teleport to Random Vents", "Player"},
 			{"Warn", "Player"},
 			{"Send Blank Chat As", "Trolling"}, {"Force Meeting By", "Trolling"},
-			{"Self-Report", "Trolling"}, {"Copy Outfit", "Trolling"},
+			{"Self-Report", "Trolling"},
 			{"Cosmetics Stealer", "Trolling"}, {"Cosmetics Resetter", "Trolling"},
 			{"Murder Loop", "Trolling"}, {"Shapeshift Player To", "Trolling"},
 			{"Unshift Player", "Trolling"}, {"Turn Player Into", "Trolling"},
@@ -191,7 +193,9 @@ namespace Menu {
 			{"Teleport To", "Trolling"}, {"Attach To", "Trolling"},
 			{"Turn into Ghost", "Trolling"}, {"Set Role", "Trolling"},
 			{"Force Color", "Trolling"}, {"Randomize Color", "Trolling"}, {"Cycle Color", "Trolling"},
-			{"Whisper To", "Trolling"}, {"Cycle Color", "Trolling"},
+			{"Cycle Color", "Trolling"},
+			{"Copy Avatar", "Social"}, {"Copy Outfit", "Social"}, {"Pet Player", "Social"},
+			{"Whisper To", "Social"}, {"Stop Whispering To", "Social"},
 			{"Steal Data", "Info"}, {"Copy PUID", "Info"},
 			{"Copy Friend Code", "Info"}, {"Report Player", "Info"},
 			{"TempBan", "Info"}, {"Roles", "Info"},
@@ -242,10 +246,10 @@ namespace Menu {
 	};
 
 	void CloseAllOtherTabs(Tabs openTab) {
-		openAbout = openTab == Tabs::About;
 		openSettings = openTab == Tabs::Settings;
 		openGame = openTab == Tabs::Game;
 		openSelf = openTab == Tabs::Self;
+		openAnimations = openTab == Tabs::Animations;
 		openRadar = openTab == Tabs::Radar;
 		openReplay = openTab == Tabs::Replay;
 		openEsp = openTab == Tabs::Esp;
@@ -284,6 +288,7 @@ namespace Menu {
 		if (name == "Settings") return Tabs::Settings;
 		if (name == "Game") return Tabs::Game;
 		if (name == "Self") return Tabs::Self;
+		if (name == "Animations") return Tabs::Animations;
 		if (name == "Radar") return Tabs::Radar;
 		if (name == "Replay") return Tabs::Replay;
 		if (name == "ESP") return Tabs::Esp;
@@ -295,11 +300,11 @@ namespace Menu {
 #ifdef _DEBUG
 		if (name == "Debug") return Tabs::Debug;
 #endif
-		return Tabs::About;
+		return Tabs::Settings;
 	}
 
 	bool IsTabUsable(Tabs tab) {
-		if (tab == Tabs::About || tab == Tabs::Settings || tab == Tabs::Game || tab == Tabs::Self ||
+		if (tab == Tabs::Settings || tab == Tabs::Game || tab == Tabs::Self || tab == Tabs::Animations ||
 			tab == Tabs::Radar || tab == Tabs::Replay || tab == Tabs::Esp) return true;
 
 		if ((IsInGame() || IsInLobby()) && tab == Tabs::Players) return true;
@@ -413,9 +418,6 @@ namespace Menu {
 				State.searchQuery = "";
 			}
 
-			if (ImGui::Selectable("About", openAbout)) {
-				CloseAllOtherTabs(Tabs::About);
-			}
 			if (ImGui::Selectable("Settings", openSettings)) {
 				CloseAllOtherTabs(Tabs::Settings);
 			}
@@ -424,6 +426,9 @@ namespace Menu {
 			}
 			if (ImGui::Selectable("Self", openSelf)) {
 				CloseAllOtherTabs(Tabs::Self);
+			}
+			if (ImGui::Selectable("Animations", openAnimations)) {
+				CloseAllOtherTabs(Tabs::Animations);
 			}
 			if (ImGui::Selectable("Radar", openRadar)) {
 				CloseAllOtherTabs(Tabs::Radar);
@@ -503,19 +508,17 @@ namespace Menu {
 
 			if (firstRender) {
 				firstRender = false;
-				CloseAllOtherTabs(Tabs::About); //welcome the user on startup
+				CloseAllOtherTabs(Tabs::Settings);
 			}
+			if (!State.HasOpenedMenuBefore) State.HasOpenedMenuBefore = true;
 			//ImGui::EndTabBar();
 			ImGui::EndChild();
 
 			//open respective tabs
-			if (openAbout) AboutTab::Render();
-			else {
-				if (!State.HasOpenedMenuBefore) State.HasOpenedMenuBefore = true;
-			}
 			if (openSettings) SettingsTab::Render();
 			if (openGame) GameTab::Render();
 			if (openSelf) SelfTab::Render();
+			if (openAnimations) AnimationsTab::Render();
 			if (openRadar) RadarTab::Render();
 			if (openReplay) ReplayTab::Render();
 			if (openEsp) EspTab::Render();
