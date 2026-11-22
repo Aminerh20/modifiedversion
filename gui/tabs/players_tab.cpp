@@ -38,6 +38,7 @@ namespace PlayersTab {
     static int matchCyclePreviousProtectionIntervalMs = 50;
     static std::vector<Game::PlayerId> matchCyclePreviousProtectionTargets;
     static constexpr int matchCycleProtectionIntervalMs = 70;
+    static constexpr int matchCycleFourImpostorIntervalMs = 90;
     static bool killToggleUiEnabled = false;
     static int killIntervalMs = 500;
     static std::chrono::steady_clock::time_point lastKillTime = std::chrono::steady_clock::now();
@@ -58,7 +59,7 @@ namespace PlayersTab {
         LobbyDelay,
         FarmingConfirmations,
         DrainFarmingPrompt,
-        WaitingForParticipants,
+        SoloLobbyKeepAlive,
         EvaluateLobby,
     };
 
@@ -142,6 +143,12 @@ namespace PlayersTab {
         std::unordered_map<Game::PlayerId, int> protectedKillCounts;
         std::unordered_set<Game::PlayerId> ghostedImpostorIds;
         bool farmingSafetyWarningsPending = false;
+        bool soloKeepAliveRound = false;
+        bool soloKeepAliveNeedsRoundSetup = false;
+        XpControllerPhase soloResumePhase = XpControllerPhase::STOPPED;
+        XpControllerStage soloResumeStage = XpControllerStage::PreparingRound;
+        bool soloResumeDeadlineIsMax = false;
+        int64_t soloResumeDeadlineRemainingMs = 0;
     };
 
     static XpControllerPhase xpControllerPhase = XpControllerPhase::STOPPED;
@@ -163,7 +170,6 @@ namespace PlayersTab {
     static std::chrono::steady_clock::time_point xpControllerDeadline;
     static std::chrono::steady_clock::time_point xpLastRosterCheck;
     static std::chrono::steady_clock::time_point xpTransitionGraceDeadline;
-    static std::chrono::steady_clock::time_point xpParticipantWaitStarted;
     static std::chrono::steady_clock::time_point xpHostAuthorityLostAt;
     static std::chrono::steady_clock::time_point xpPostChatDeadline;
     static std::chrono::steady_clock::time_point xpNextChatSendAt;
@@ -202,6 +208,13 @@ namespace PlayersTab {
     static bool xpDrainReturnAfterFarmingBreak = false;
     static bool xpDrainBonusBatchPendingStart = false;
     static bool xpDrainFarmingPromptGracePending = false;
+    static bool xpSoloKeepAliveRound = false;
+    static bool xpSoloKeepAliveNeedsRoundSetup = false;
+    static XpControllerPhase xpSoloResumePhase = XpControllerPhase::STOPPED;
+    static XpControllerStage xpSoloResumeStage = XpControllerStage::PreparingRound;
+    static bool xpSoloResumeDeadlineIsMax = false;
+    static std::chrono::steady_clock::time_point xpSoloResumeDeadline;
+    static std::chrono::steady_clock::time_point xpSoloKeepAliveStartedAt;
     static bool xpFarmingConfirmationPending = false;
     static bool xpDrainStopRequested = false;
     static size_t xpDrainStopEligibleCount = 0;
@@ -219,7 +232,6 @@ namespace PlayersTab {
     static std::chrono::steady_clock::time_point xpLevelRejoinDeadline;
     static Game::PlayerId xpFarmingRotationCursor = 0;
     static bool xpHasFarmingRotationCursor = false;
-    static XpControllerStage xpStageBeforeParticipantWait = XpControllerStage::PreparingRound;
     static constexpr auto xpRoundPrepareDelay = std::chrono::seconds(1);
     static constexpr auto xpFarmingLobbyGraceDuration = std::chrono::seconds(20);
     static constexpr auto xpDrainFarmingPromptResponseDuration = std::chrono::seconds(15);
@@ -236,8 +248,10 @@ namespace PlayersTab {
     static constexpr auto transitionGraceDuration = std::chrono::seconds(10);
     static constexpr auto xpHostAuthorityGraceDuration = std::chrono::seconds(10);
     static constexpr auto xpStageTimeout = std::chrono::seconds(60);
-    static constexpr auto xpRosterCheckInterval = std::chrono::milliseconds(70);
+    static constexpr auto xpSoloKeepAliveInterval = std::chrono::minutes(5);
 
+    static void BeginXpFarmingRound();
+    static void BeginXpRolloverRound();
     static void SetShieldState(Game::PlayerId playerId, bool enabled);
     static void RestoreMatchCycleProtectionSettings();
     static void RecordConnectedXpLevels();
@@ -250,11 +264,19 @@ namespace PlayersTab {
             && player->fields.PlayerId == (*Game::pLocalPlayer)->fields.PlayerId;
     }
 
-    static int GetMatchCycleTeamCap(size_t totalParticipants) {
-        if (totalParticipants >= 6) return 3;
-        if (totalParticipants >= 4) return 2;
-        if (totalParticipants >= 3) return 1;
+    static int GetMatchCycleTeamCap(size_t nonHostParticipants) {
+        if (nonHostParticipants >= 8) return 4;
+        if (nonHostParticipants >= 7) return 3;
+        if (nonHostParticipants >= 4) return 2;
+        if (nonHostParticipants >= 1) return 1;
         return 0;
+    }
+
+    static std::chrono::milliseconds GetMatchCycleUpdateInterval() {
+        return std::chrono::milliseconds(
+            xpRoundImpostorIds.size() >= 4
+                ? matchCycleFourImpostorIntervalMs
+                : matchCycleProtectionIntervalMs);
     }
 
     bool IsXpControllerRunning() {
@@ -281,7 +303,7 @@ namespace PlayersTab {
         case XpControllerStage::LobbyDelay: return "LobbyDelay";
         case XpControllerStage::FarmingConfirmations: return "FarmingConfirmations";
         case XpControllerStage::DrainFarmingPrompt: return "DrainFarmingPrompt";
-        case XpControllerStage::WaitingForParticipants: return "WaitingForParticipants";
+        case XpControllerStage::SoloLobbyKeepAlive: return "SoloLobbyKeepAlive";
         case XpControllerStage::EvaluateLobby: return "EvaluateLobby";
         }
         return "Unknown";
@@ -683,24 +705,79 @@ namespace PlayersTab {
         });
     }
 
-    static void PauseForNonHostParticipants(std::chrono::steady_clock::time_point now) {
-        if (xpControllerStage == XpControllerStage::WaitingForParticipants) return;
+    static void EnterSoloLobbyKeepAlive(
+        std::chrono::steady_clock::time_point now,
+        bool needsRoundSetup = false) {
+        if (xpControllerStage == XpControllerStage::SoloLobbyKeepAlive) return;
+        xpSoloResumePhase = xpControllerPhase;
+        xpSoloResumeStage = xpControllerStage;
+        xpSoloResumeDeadline = xpControllerDeadline;
+        xpSoloResumeDeadlineIsMax =
+            xpControllerDeadline == (std::chrono::steady_clock::time_point::max)();
+        xpSoloKeepAliveNeedsRoundSetup = needsRoundSetup;
+        xpSoloKeepAliveRound = false;
+        xpSoloKeepAliveStartedAt = now;
+        xpControllerStage = XpControllerStage::SoloLobbyKeepAlive;
+        xpControllerDeadline = now + xpSoloKeepAliveInterval;
         LogXpControllerEvent(std::format(
-            "Pausing stage={} because no non-host participants are connected; inLobby={}, trackedPlayers={}.",
-            XpControllerStageName(xpControllerStage), IsInLobby(), xpTrackedPlayers.size()));
-        xpStageBeforeParticipantWait = xpControllerStage;
-        xpControllerStage = XpControllerStage::WaitingForParticipants;
-        xpParticipantWaitStarted = now;
+            "No non-host participants are connected; entering solo lobby keep-alive and scheduling a brief start/end in {}s. {}",
+            xpSoloKeepAliveInterval.count(), BuildXpControllerDiagnostics()));
     }
 
-    static void ResumeAfterNonHostParticipantReturns(std::chrono::steady_clock::time_point now) {
-        const auto pausedFor = std::chrono::duration_cast<std::chrono::seconds>(now - xpParticipantWaitStarted).count();
+    static void ScheduleNextSoloKeepAlive(std::chrono::steady_clock::time_point now) {
+        xpSoloKeepAliveRound = false;
+        xpSoloKeepAliveStartedAt = now;
+        xpControllerStage = XpControllerStage::SoloLobbyKeepAlive;
+        xpControllerDeadline = now + xpSoloKeepAliveInterval;
         LogXpControllerEvent(std::format(
-            "Resuming stage={} after non-host participant returned; connectedNonHost={}, pausedSeconds={}.",
-            XpControllerStageName(xpStageBeforeParticipantWait), GetConnectedNonHostCount(), pausedFor));
-        xpControllerDeadline += now - xpParticipantWaitStarted;
-        xpControllerStage = xpStageBeforeParticipantWait;
+            "Solo keep-alive round ended; next lobby start is scheduled in {}s.",
+            xpSoloKeepAliveInterval.count()));
+    }
+
+    static void ResumeFromSoloLobbyKeepAlive(std::chrono::steady_clock::time_point now) {
+        const auto soloDuration = now - xpSoloKeepAliveStartedAt;
+        const auto resumedPhase = xpSoloResumePhase;
+        const bool needsRoundSetup = xpSoloKeepAliveNeedsRoundSetup;
+        xpControllerPhase = resumedPhase;
+        xpControllerStage = xpSoloResumeStage;
+        xpControllerDeadline = xpSoloResumeDeadlineIsMax
+            ? (std::chrono::steady_clock::time_point::max)()
+            : xpSoloResumeDeadline + soloDuration;
+        xpSoloKeepAliveNeedsRoundSetup = false;
+        xpSoloKeepAliveStartedAt = {};
+        xpSoloKeepAliveRound = false;
         xpLastRosterCheck = now;
+        LogXpControllerEvent(std::format(
+            "Non-host participant joined during solo keep-alive; resuming phase={} stage={} after pausing timers for {}ms.",
+            XpControllerPhaseName(resumedPhase),
+            XpControllerStageName(xpControllerStage),
+            std::chrono::duration_cast<std::chrono::milliseconds>(soloDuration).count()));
+
+        if (!needsRoundSetup) return;
+        if (xpControllerPhase == XpControllerPhase::FARMING_ROUND) {
+            BeginXpFarmingRound();
+        }
+        else if (xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP) {
+            BeginXpRolloverRound();
+        }
+    }
+
+    static void StartSoloLobbyKeepAliveMatch() {
+        if (!IsInLobby() || !IsHost()
+            || Game::pAmongUsClient == nullptr || *Game::pAmongUsClient == nullptr) {
+            ScheduleNextSoloKeepAlive(std::chrono::steady_clock::now());
+            LogXpControllerEvent(
+                "Solo lobby keep-alive could not start because lobby/host state was unavailable; retrying in five minutes.");
+            return;
+        }
+        if (g_rpcEmittedThisFrame >= kRpcBudgetPerFrame) return;
+        LogXpControllerEvent(
+            "Starting a host-only keep-alive match; it will be ended as soon as the game loads.");
+        InnerNetClient_SendStartGame((InnerNetClient*)(*Game::pAmongUsClient), NULL);
+        ++g_rpcEmittedThisFrame;
+        xpSoloKeepAliveRound = true;
+        xpControllerStage = XpControllerStage::AwaitingMatch;
+        xpControllerDeadline = std::chrono::steady_clock::now() + xpStageTimeout;
     }
 
     static void StopXpController(const std::string& reason, bool showToast = true) {
@@ -730,6 +807,9 @@ namespace PlayersTab {
         xpDrainReturnAfterFarmingBreak = false;
         xpDrainBonusBatchPendingStart = false;
         xpDrainFarmingPromptGracePending = false;
+        xpSoloKeepAliveRound = false;
+        xpSoloKeepAliveNeedsRoundSetup = false;
+        xpSoloKeepAliveStartedAt = {};
         xpRolesPendingAssignment.clear();
         xpRoleAssignmentCursor = 0;
         xpRoleAssignedPlayers = 0;
@@ -832,7 +912,7 @@ namespace PlayersTab {
         if (participants.empty()) return 0;
 
         const size_t teamCap = static_cast<size_t>((std::max)(
-            GetMatchCycleTeamCap(participants.size() + 1), 1));
+            GetMatchCycleTeamCap(participants.size()), 1));
         const size_t drainRounds = static_cast<size_t>((std::max)(GetXpDrainRoundsTarget(), 0));
         std::vector<bool> completed(participants.size(), false);
         for (const auto playerId : xpRoundImpostorIds) {
@@ -962,13 +1042,18 @@ namespace PlayersTab {
     static bool ConfigureMatchCycleTeams(bool unearnedOnly) {
         const auto players = GetConnectedXpPlayers();
         const size_t participantCount = GetConnectedNonHostCount();
-        const int teamCap = GetMatchCycleTeamCap(players.size());
+        const int teamCap = GetMatchCycleTeamCap(participantCount);
         if (participantCount == 0 || players.empty()) {
             LogXpControllerEvent(std::format(
                 "Team setup deferred: connectedPlayers={}, connectedNonHost={}, phase={}, stage={}.",
                 players.size(), participantCount, XpControllerPhaseName(xpControllerPhase),
                 XpControllerStageName(xpControllerStage)));
-            PauseForNonHostParticipants(std::chrono::steady_clock::now());
+            if (participantCount == 0) {
+                EnterSoloLobbyKeepAlive(std::chrono::steady_clock::now(), true);
+            }
+            else {
+                StopXpController("No connected host player is available for team setup.");
+            }
             return false;
         }
 
@@ -1270,6 +1355,12 @@ namespace PlayersTab {
             static_cast<int64_t>(roundSeconds) * 500);
     }
 
+    static bool HasXpFarmingRoundFailure() {
+        return xpRoundShieldFailure
+            || xpNoActiveFarmingImpostors
+            || !xpRoundGhostedImpostorIds.empty();
+    }
+
     static void CaptureXpRoundLevelBaselines(bool farmingRound) {
         xpRoundLevelBaselines.clear();
         std::vector<Game::PlayerId> captureIds;
@@ -1432,9 +1523,13 @@ namespace PlayersTab {
     static void ReconcileMatchCycleShields() {
         if (!IsXpControllerRunning() || !IsHost()
             || xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP) return;
+        if (matchCycleProtectionOwnsSettings) {
+            protectionIntervalMs =
+                static_cast<int>(GetMatchCycleUpdateInterval().count());
+        }
 
         const auto connectedPlayers = GetConnectedXpPlayers();
-        const int teamCap = GetMatchCycleTeamCap(connectedPlayers.size());
+        const int teamCap = GetMatchCycleTeamCap(GetConnectedNonHostCount());
         std::vector<PlayerControl*> eligibleDefenders;
         for (auto player : connectedPlayers) {
             auto tracked = xpTrackedPlayers.find(player->fields.PlayerId);
@@ -1504,8 +1599,8 @@ namespace PlayersTab {
 
         const auto now = std::chrono::steady_clock::now();
         const bool sameSet = (desiredShields == lastDesiredShields);
-        const bool intervalElapsed =
-            (now - lastShieldSendAt) >= std::chrono::milliseconds(protectionIntervalMs);
+        const auto updateInterval = GetMatchCycleUpdateInterval();
+        const bool intervalElapsed = (now - lastShieldSendAt) >= updateInterval;
         if (sameSet && !intervalElapsed) return;
 
         bool shieldSetChanged = false;
@@ -1551,6 +1646,11 @@ namespace PlayersTab {
 
     static void BeginXpFarmingRound() {
         if (!IsInLobby() || !IsHost()) return;
+        xpControllerPhase = XpControllerPhase::FARMING_ROUND;
+        if (GetConnectedNonHostCount() == 0) {
+            EnterSoloLobbyKeepAlive(std::chrono::steady_clock::now(), true);
+            return;
+        }
         if (!ConfigureMatchCycleTeams(true)) return;
         xpRoundShieldFailure = false;
         xpRoundShieldFailureWaived = false;
@@ -1594,6 +1694,11 @@ namespace PlayersTab {
 
     static void BeginXpRolloverRound() {
         if (!IsInLobby() || !IsHost()) return;
+        xpControllerPhase = XpControllerPhase::ROLLOVER_LOOP;
+        if (GetConnectedNonHostCount() == 0) {
+            EnterSoloLobbyKeepAlive(std::chrono::steady_clock::now(), true);
+            return;
+        }
         if (!ConfigureMatchCycleTeams(false)) return;
         xpRoundShieldFailure = false;
         xpRoundShieldFailureWaived = false;
@@ -1962,6 +2067,33 @@ namespace PlayersTab {
                 xpDrainRoundsTarget));
         }
         else {
+        if (!xpLegacyFarmingRoundFailed
+            && HasXpFarmingRoundFailure()
+            && HasXpRoundPassedFiftyPercent()) {
+            xpRoundShieldFailureWaived = true;
+        }
+            if (xpProgressMode != XpProgressMode::LegacyChat
+                && HasXpFarmingRoundFailure()
+                && !xpRoundShieldFailureWaived) {
+                for (const auto playerId : xpRoundImpostorIds) {
+                    xpFarmingCompletedPlayerIds.erase(playerId);
+                    xpFarmingRetryPlayerIds.insert(playerId);
+                    auto tracked = xpTrackedPlayers.find(playerId);
+                    if (tracked == xpTrackedPlayers.end()) continue;
+                    tracked->second.has_earned_xp = false;
+                    tracked->second.has_completed_objective = false;
+                    tracked->second.farmed_this_round = false;
+                }
+                xpControllerStage = XpControllerStage::LobbyDelay;
+                xpControllerDeadline = std::chrono::steady_clock::now()
+                    + xpFarmingLobbyGraceDuration;
+                QueueXpControllerChat(
+                    "Farming round failed before 50%; assigned Impostors remain incomplete and will be retried.");
+                LogXpControllerEvent(std::format(
+                    "Farming round failed before 50%; cleared completion for all {} assigned Impostor(s), including ghosted players. {}",
+                    xpRoundImpostorIds.size(), BuildXpControllerDiagnostics()));
+                return;
+            }
             if (xpProgressMode != XpProgressMode::LegacyChat) {
                 bool levelEvidenceAvailable = true;
                 for (const auto playerId : xpRoundImpostorIds) {
@@ -1993,8 +2125,9 @@ namespace PlayersTab {
             }
             if (xpProgressMode == XpProgressMode::LegacyChat) {
                 xpLegacyFarmingRoundFailed =
-                    (xpRoundShieldFailure || xpNoActiveFarmingImpostors)
-                    && !xpRoundShieldFailureWaived;
+                    xpLegacyFarmingRoundFailed
+                    || (HasXpFarmingRoundFailure()
+                        && !xpRoundShieldFailureWaived);
                 if (xpLegacyFarmingRoundFailed) {
                     for (const auto playerId : xpRoundImpostorIds) {
                         xpFarmingCompletedPlayerIds.erase(playerId);
@@ -2112,17 +2245,8 @@ namespace PlayersTab {
 
     static void ProcessXpLobbyDelay() {
         if (xpFarmingSafetyWarningsPending) {
-            for (const auto playerId : xpRoundGhostedImpostorIds) {
-                const auto tracked = xpTrackedPlayers.find(playerId);
-                const std::string name = tracked == xpTrackedPlayers.end()
-                    ? std::format("Player {}", playerId)
-                    : XpControllerChatName(tracked->second.name);
-                QueueXpControllerChat(std::format(
-                    "{}: slow your autoclicker; don't get past ghost protection.",
-                    name));
-            }
             QueueXpControllerChat(
-                "Impostors: split up; never target the same crewmate.");
+                "Impostors: stay separate; never have two Impostors farm one Crewmate.");
             xpFarmingSafetyWarningsPending = false;
             LogXpControllerEvent(std::format(
                 "Queued post-grace safety warnings for {} ghosted farming Impostor(s).",
@@ -2156,7 +2280,7 @@ namespace PlayersTab {
                 xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP
                     ? xpDrainBetweenRoundRejoinSeconds : 20,
                 IsInLobby(), XpControllerStageName(xpControllerStage)));
-            PauseForNonHostParticipants(std::chrono::steady_clock::now());
+            EnterSoloLobbyKeepAlive(std::chrono::steady_clock::now());
             return;
         }
 
@@ -2375,6 +2499,17 @@ namespace PlayersTab {
         xpControllerSnapshot.ghostedImpostorIds = xpRoundGhostedImpostorIds;
         xpControllerSnapshot.farmingSafetyWarningsPending =
             xpFarmingSafetyWarningsPending;
+        xpControllerSnapshot.soloKeepAliveRound = xpSoloKeepAliveRound;
+        xpControllerSnapshot.soloKeepAliveNeedsRoundSetup = xpSoloKeepAliveNeedsRoundSetup;
+        xpControllerSnapshot.soloResumePhase = xpSoloResumePhase;
+        xpControllerSnapshot.soloResumeStage = xpSoloResumeStage;
+        xpControllerSnapshot.soloResumeDeadlineIsMax = xpSoloResumeDeadlineIsMax;
+        xpControllerSnapshot.soloResumeDeadlineRemainingMs =
+            xpSoloResumeDeadlineIsMax
+            ? 0
+            : (std::max)(int64_t{0},
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    xpSoloResumeDeadline - std::chrono::steady_clock::now()).count());
         NotifyXpController(
             "Match Cycle snapshot saved",
             "Pause and restore this exact controller state.",
@@ -2431,6 +2566,12 @@ namespace PlayersTab {
         xpRoundGhostedImpostorIds = xpControllerSnapshot.ghostedImpostorIds;
         xpFarmingSafetyWarningsPending =
             xpControllerSnapshot.farmingSafetyWarningsPending;
+        xpSoloKeepAliveRound = xpControllerSnapshot.soloKeepAliveRound;
+        xpSoloKeepAliveNeedsRoundSetup =
+            xpControllerSnapshot.soloKeepAliveNeedsRoundSetup;
+        xpSoloResumePhase = xpControllerSnapshot.soloResumePhase;
+        xpSoloResumeStage = xpControllerSnapshot.soloResumeStage;
+        xpSoloResumeDeadlineIsMax = xpControllerSnapshot.soloResumeDeadlineIsMax;
         for (const auto playerId : xpRoundGhostedImpostorIds) {
             const auto tracked = xpTrackedPlayers.find(playerId);
             if (tracked == xpTrackedPlayers.end()) continue;
@@ -2441,6 +2582,12 @@ namespace PlayersTab {
         xpControllerDeadline = xpControllerSnapshot.deadlineIsMax
             ? (std::chrono::steady_clock::time_point::max)()
             : now + std::chrono::milliseconds(xpControllerSnapshot.deadlineRemainingMs);
+        xpSoloResumeDeadline = xpSoloResumeDeadlineIsMax
+            ? (std::chrono::steady_clock::time_point::max)()
+            : now + std::chrono::milliseconds(
+                xpControllerSnapshot.soloResumeDeadlineRemainingMs);
+        xpSoloKeepAliveStartedAt =
+            xpControllerStage == XpControllerStage::SoloLobbyKeepAlive ? now : {};
         xpTransitionGraceDeadline =
             now + std::chrono::milliseconds(xpControllerSnapshot.transitionRemainingMs);
         xpControllerPaused = false;
@@ -2881,6 +3028,13 @@ namespace PlayersTab {
         xpDrainReturnAfterFarmingBreak = false;
         xpDrainBonusBatchPendingStart = false;
         xpDrainFarmingPromptGracePending = false;
+        xpSoloKeepAliveRound = false;
+        xpSoloKeepAliveNeedsRoundSetup = false;
+        xpSoloResumePhase = XpControllerPhase::STOPPED;
+        xpSoloResumeStage = XpControllerStage::PreparingRound;
+        xpSoloResumeDeadlineIsMax = false;
+        xpSoloResumeDeadline = {};
+        xpSoloKeepAliveStartedAt = {};
         xpControllerPaused = false;
         xpPauseDeadlineRemainingMs = 0;
         xpControllerSnapshot.valid = false;
@@ -2897,22 +3051,23 @@ namespace PlayersTab {
             Toasts::AddToast("XP Controller", "No connected players are available.", ImVec4(1.f, 0.3f, 0.3f, 1.f));
             return;
         }
-        if (GetConnectedNonHostCount() < 2) {
-            xpTrackedPlayers.clear();
-            Toasts::AddToast("XP Controller", "At least two connected non-host participants are required.", ImVec4(1.f, 0.3f, 0.3f, 1.f));
-            return;
-        }
-
         xpControllerPreviousNoGameEnd = State.NoGameEnd;
         xpControllerOwnsNoGameEnd = true;
         State.NoGameEnd = true;
         xpControllerPhase = XpControllerPhase::FARMING_ROUND;
+        xpControllerStage = XpControllerStage::PreparingRound;
+        xpControllerDeadline = std::chrono::steady_clock::now();
         xpLastRosterCheck = std::chrono::steady_clock::now();
         xpTransitionGraceDeadline = xpLastRosterCheck;
         xpHostAuthorityLostAt = {};
         LogXpControllerEvent(std::format("Match Cycle started. {}", BuildXpControllerDiagnostics()));
         BeginXpFarmingRound();
-        Toasts::AddToast("XP Controller", "Starting the farming rounds.", ImVec4(0.f, 1.f, 0.5f, 1.f));
+        Toasts::AddToast(
+            "XP Controller",
+            GetConnectedNonHostCount() == 0
+                ? "Waiting for players; solo lobby keep-alive is enabled."
+                : "Starting the farming rounds.",
+            ImVec4(0.f, 1.f, 0.5f, 1.f));
     }
 
     void StopXpController() {
@@ -2972,6 +3127,11 @@ namespace PlayersTab {
         const std::string rosterStatus = std::format(
             " | {} tracked / {} disconnected / {} needing rejoin",
             trackedCount, disconnectedCount, needingRejoinCount);
+        if (xpControllerStage == XpControllerStage::SoloLobbyKeepAlive) {
+            return std::format(
+                "Waiting for participants - solo lobby keep-alive in {}s{}",
+                remaining, rosterStatus);
+        }
         if (xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP) {
             if (xpControllerStage == XpControllerStage::AwaitingRejoin) {
                 return std::format("Drain rounds complete - rejoin window - {}s{}", remaining, rosterStatus);
@@ -3054,25 +3214,25 @@ namespace PlayersTab {
             && xpControllerStage == XpControllerStage::LobbyDelay
             && now < xpControllerDeadline;
 
-        if (xpControllerStage == XpControllerStage::WaitingForParticipants) {
+        if (xpControllerStage == XpControllerStage::SoloLobbyKeepAlive) {
             if (!inLobby) return;
-            if (now < xpTransitionGraceDeadline || GetConnectedNonHostCount() == 0) return;
-            ResumeAfterNonHostParticipantReturns(now);
+            if (GetConnectedNonHostCount() > 0) {
+                ResumeFromSoloLobbyKeepAlive(now);
+            }
+            else if (now >= xpControllerDeadline) {
+                StartSoloLobbyKeepAliveMatch();
+                return;
+            }
         }
-        else if (inLobby && !transitioningToLobby && !lobbyDelayPending
-            && xpControllerStage != XpControllerStage::AwaitingRejoin
-            && xpControllerStage != XpControllerStage::FarmingConfirmations
-            && xpControllerStage != XpControllerStage::DrainFarmingPrompt
-            && !xpDrainRejoinGracePending
-            && now >= xpTransitionGraceDeadline && GetConnectedNonHostCount() == 0) {
-            PauseForNonHostParticipants(now);
+        else if (inLobby && !transitioningToLobby
+            && GetConnectedNonHostCount() == 0) {
+            EnterSoloLobbyKeepAlive(now);
             return;
         }
-
         if (!transitioningToLobby && !lobbyDelayPending) {
             SynchronizeXpPlayers();
         }
-        if (now - xpLastRosterCheck >= xpRosterCheckInterval) {
+        if (now - xpLastRosterCheck >= GetMatchCycleUpdateInterval()) {
             if (!transitioningToLobby && !lobbyDelayPending) {
                 xpLastRosterCheck = now;
                 ReconcileMatchCycleShields();
@@ -3094,15 +3254,34 @@ namespace PlayersTab {
             if (IsInLobby() && now >= xpControllerDeadline) StartPreparedXpMatch();
             break;
         case XpControllerStage::AwaitingMatch:
-            if (now >= xpControllerDeadline) {
+            if (xpSoloKeepAliveRound && IsInGame()) {
+                xpControllerStage = XpControllerStage::MatchTimer;
+                xpRoundStartedAt = now;
+                xpControllerDeadline = now;
+                LogXpControllerEvent(
+                    "Host-only keep-alive game loaded; ending it immediately.");
+                ForceEndXpMatch();
+            }
+            else if (now >= xpControllerDeadline && xpSoloKeepAliveRound) {
+                LogXpControllerEvent(
+                    "Host-only keep-alive game did not start before timeout; retrying in five minutes.");
+                ScheduleNextSoloKeepAlive(now);
+            }
+            else if (now >= xpControllerDeadline) {
                 StopXpController("The match did not start before the timeout.");
             }
             break;
         case XpControllerStage::MatchTimer:
-            if (IsInLobby()) {
+            if (xpSoloKeepAliveRound && IsInLobby()) {
+                ScheduleNextSoloKeepAlive(now);
+            }
+            else if (xpSoloKeepAliveRound) {
+                ForceEndXpMatch();
+            }
+            else if (IsInLobby()) {
                 HandleXpRoundReturnedToLobby();
             }
-            else if (xpRoundShieldFailure || xpNoActiveFarmingImpostors) {
+            else if (HasXpFarmingRoundFailure()) {
                 if (HasXpRoundPassedFiftyPercent()) {
                     xpRoundShieldFailureWaived = true;
                     if (!xpNoActiveFarmingImpostors) {
@@ -3112,7 +3291,9 @@ namespace PlayersTab {
                         "{} waived because the round passed 50% ({}/{}s); ending normally.",
                         xpNoActiveFarmingImpostors
                             ? "No active farming Impostors"
-                            : "Shield failure",
+                            : (!xpRoundGhostedImpostorIds.empty()
+                                ? "Ghosted farming Impostor failure"
+                                : "Shield failure"),
                         std::chrono::duration_cast<std::chrono::seconds>(
                             std::chrono::steady_clock::now() - xpRoundStartedAt).count(),
                         xpControllerPhase == XpControllerPhase::FARMING_ROUND
@@ -3120,10 +3301,15 @@ namespace PlayersTab {
                     ForceEndXpMatch();
                     break;
                 }
+                if (xpProgressMode == XpProgressMode::LegacyChat) {
+                    xpLegacyFarmingRoundFailed = true;
+                }
                 LogXpControllerEvent(
                     xpNoActiveFarmingImpostors
                         ? "No active farming Impostors remain; force-ending round early."
-                        : "Shield failure detected; force-ending round early.");
+                        : (!xpRoundGhostedImpostorIds.empty()
+                            ? "A farming Impostor was ghosted before 50%; force-ending the round as failed."
+                            : "Shield failure detected; force-ending round early."));
                 ForceEndXpMatch();
             }
             else if (now >= xpControllerDeadline) {
@@ -3132,7 +3318,12 @@ namespace PlayersTab {
             break;
         case XpControllerStage::AwaitingLobby:
             if (IsInLobby()) {
-                HandleXpRoundReturnedToLobby();
+                if (xpSoloKeepAliveRound) {
+                    ScheduleNextSoloKeepAlive(now);
+                }
+                else {
+                    HandleXpRoundReturnedToLobby();
+                }
             }
             else if (now >= xpControllerDeadline) {
                 StopXpController("The lobby did not return before the timeout.");
@@ -3180,7 +3371,7 @@ namespace PlayersTab {
                 ProcessXpDrainFarmingPrompt();
             }
             break;
-        case XpControllerStage::WaitingForParticipants:
+        case XpControllerStage::SoloLobbyKeepAlive:
             break;
         case XpControllerStage::EvaluateLobby:
             if (xpDrainReturnAfterFarmingBreak
@@ -3251,6 +3442,15 @@ namespace PlayersTab {
     void OnXpControllerGameStarted() {
         if (!IsXpControllerRunning() || !IsHost()
             || xpControllerStage != XpControllerStage::AwaitingMatch) return;
+
+        if (xpSoloKeepAliveRound) {
+            xpControllerStage = XpControllerStage::MatchTimer;
+            xpRoundStartedAt = std::chrono::steady_clock::now();
+            xpControllerDeadline = xpRoundStartedAt;
+            LogXpControllerEvent(
+                "Host-only keep-alive game loaded; the controller will end it on the next update.");
+            return;
+        }
 
         ReconcileXpRoundRolesAtStart();
         const int matchDurationSeconds = xpControllerPhase == XpControllerPhase::FARMING_ROUND
@@ -3456,7 +3656,7 @@ namespace PlayersTab {
             if (std::find(protectionTargets.begin(), protectionTargets.end(), playerId) == protectionTargets.end()) {
                 protectionTargets.push_back(playerId);
             }
-            protectionIntervalMs = matchCycleProtectionIntervalMs;
+            protectionIntervalMs = static_cast<int>(GetMatchCycleUpdateInterval().count());
             if (!protectionToggleUiEnabled) {
                 ToggleProtection(true);
             }
