@@ -96,7 +96,6 @@ void dRoleManager_SelectRoles(RoleManager* __this, MethodInfo* method);
 //void dRoleManager_AssignRolesForTeam(List_1_GameData_PlayerInfo_* players, RoleOptionsData* opts, RoleTeamTypes__Enum team, int32_t teamMax, Nullable_1_RoleTypes_ defaultRole, MethodInfo* method);
 //void dRoleManager_AssignRolesFromList(List_1_GameData_PlayerInfo_* players, int32_t teamMax, List_1_RoleTypes_* roleList, int32_t* rolesAssigned, MethodInfo* method);
 void dPlayerPhysics_FixedUpdate(PlayerPhysics* __this, MethodInfo* method);
-void dPlayerPhysics_HandleAnimation(PlayerPhysics* __this, MethodInfo* method);
 bool dSaveManager_GetPurchase(String* itemKey, String* bundleKey, MethodInfo* method);
 void dPlayerControl_TurnOnProtection(PlayerControl* __this, bool visible, int32_t colorId, int32_t guardianPlayerId, MethodInfo* method);
 void dPlayerControl_RemoveProtection(PlayerControl* __this, MethodInfo* method);

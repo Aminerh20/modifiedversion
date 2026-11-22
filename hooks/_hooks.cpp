@@ -182,7 +182,6 @@ void DetourInitilization() {
 	HOOKFUNC(InnerNetClient_EnqueueDisconnect);
 	HOOKFUNC(GameManager_RpcEndGame);
 	HOOKFUNC(PlayerPhysics_FixedUpdate);
-	HOOKFUNC(PlayerPhysics_HandleAnimation);
 	HOOKFUNC(PlayerPurchasesData_GetPurchase);
 	HOOKFUNC(PlayerControl_TurnOnProtection);
 	HOOKFUNC(PlayerControl_RemoveProtection);
@@ -330,7 +329,6 @@ void DetourUninitialization()
 
 	UNHOOKFUNC(PlayerPurchasesData_GetPurchase);
 	UNHOOKFUNC(PlayerPhysics_FixedUpdate);
-	UNHOOKFUNC(PlayerPhysics_HandleAnimation);
 	UNHOOKFUNC(GameObject_SetActive);
 	UNHOOKFUNC(SceneManager_Internal_ActiveSceneChanged);
 	UNHOOKFUNC(PlayerControl_FixedUpdate);
