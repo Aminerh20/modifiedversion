@@ -73,9 +73,12 @@ namespace PlayersTab {
         bool has_farming_attempt = false;
         bool connected = false;
         bool disconnected_after_rejoin_request = false;
+        bool disconnected_during_farming_round = false;
         bool was_impostor_this_round = false;
         bool farmed_this_round = false;
         bool demoted_to_ghost_this_round = false;
+        std::string puid;
+        std::string friend_code;
         std::string name;
     };
 
@@ -142,7 +145,6 @@ namespace PlayersTab {
         std::unordered_set<Game::PlayerId> deferredFarmingRetryIds;
         std::unordered_set<Game::PlayerId> deferredFarmingRetryUsedIds;
         bool deferredFarmingRetryActive = false;
-        bool forceDrainAfterDeferredRetry = false;
         std::unordered_map<Game::PlayerId, int> protectedKillCounts;
         std::unordered_set<Game::PlayerId> ghostedImpostorIds;
         bool farmingSafetyWarningsPending = false;
@@ -166,7 +168,6 @@ namespace PlayersTab {
     static std::unordered_set<Game::PlayerId> xpDeferredFarmingRetryIds;
     static std::unordered_set<Game::PlayerId> xpDeferredFarmingRetryUsedIds;
     static bool xpDeferredFarmingRetryActive = false;
-    static bool xpForceDrainAfterDeferredRetry = false;
     static std::unordered_map<Game::PlayerId, int> xpRoundProtectedKillCounts;
     static std::unordered_set<Game::PlayerId> xpRoundGhostedImpostorIds;
     static bool xpFarmingSafetyWarningsPending = false;
@@ -583,6 +584,69 @@ namespace PlayersTab {
         BroadcastXpControllerPlayerList("NEED", stillNeedFarming, xpFarmingAnnouncementDelay);
     }
 
+    template <typename Map>
+    static void MigrateXpPlayerMapKey(
+        Map& values,
+        Game::PlayerId oldPlayerId,
+        Game::PlayerId newPlayerId) {
+        const auto oldEntry = values.find(oldPlayerId);
+        if (oldEntry == values.end()) return;
+        auto value = std::move(oldEntry->second);
+        values.erase(oldEntry);
+        values.insert_or_assign(newPlayerId, std::move(value));
+    }
+
+    template <typename Set>
+    static void MigrateXpPlayerSetKey(
+        Set& values,
+        Game::PlayerId oldPlayerId,
+        Game::PlayerId newPlayerId) {
+        if (values.erase(oldPlayerId) != 0) values.insert(newPlayerId);
+    }
+
+    static void MigrateXpPlayerVectorId(
+        std::vector<Game::PlayerId>& values,
+        Game::PlayerId oldPlayerId,
+        Game::PlayerId newPlayerId) {
+        std::replace(values.begin(), values.end(), oldPlayerId, newPlayerId);
+        std::unordered_set<Game::PlayerId> seen;
+        values.erase(
+            std::remove_if(values.begin(), values.end(), [&seen](Game::PlayerId playerId) {
+                return !seen.insert(playerId).second;
+            }),
+            values.end());
+    }
+
+    static void MigrateXpPlayerId(
+        Game::PlayerId oldPlayerId,
+        Game::PlayerId newPlayerId) {
+        MigrateXpPlayerMapKey(xpTrackedPlayers, oldPlayerId, newPlayerId);
+        MigrateXpPlayerMapKey(xpFarmingConfirmationResponses, oldPlayerId, newPlayerId);
+        MigrateXpPlayerMapKey(xpLegacyFarmingFailureStreak, oldPlayerId, newPlayerId);
+        MigrateXpPlayerMapKey(xpRoundProtectedKillCounts, oldPlayerId, newPlayerId);
+        MigrateXpPlayerMapKey(xpRoundLevelBaselines, oldPlayerId, newPlayerId);
+        MigrateXpPlayerMapKey(xpLevelBaselines, oldPlayerId, newPlayerId);
+
+        MigrateXpPlayerSetKey(xpFarmingCompletedPlayerIds, oldPlayerId, newPlayerId);
+        MigrateXpPlayerSetKey(xpFarmingRetryPlayerIds, oldPlayerId, newPlayerId);
+        MigrateXpPlayerSetKey(xpDeferredFarmingRetryIds, oldPlayerId, newPlayerId);
+        MigrateXpPlayerSetKey(xpDeferredFarmingRetryUsedIds, oldPlayerId, newPlayerId);
+        MigrateXpPlayerSetKey(xpRoundGhostedImpostorIds, oldPlayerId, newPlayerId);
+        MigrateXpPlayerSetKey(xpRoundGhostedBeforeFiftyPercentIds, oldPlayerId, newPlayerId);
+        MigrateXpPlayerSetKey(xpDrainStopVoterIds, oldPlayerId, newPlayerId);
+        MigrateXpPlayerSetKey(xpDrainFarmingMeUsedPlayerIds, oldPlayerId, newPlayerId);
+
+        MigrateXpPlayerVectorId(xpRoundImpostorIds, oldPlayerId, newPlayerId);
+        MigrateXpPlayerVectorId(xpRolesPendingAssignment, oldPlayerId, newPlayerId);
+        MigrateXpPlayerVectorId(xpDrainFarmingBonusPlayerIds, oldPlayerId, newPlayerId);
+        if (xpHasFarmingRotationCursor && xpFarmingRotationCursor == oldPlayerId) {
+            xpFarmingRotationCursor = newPlayerId;
+        }
+        LogXpControllerEvent(std::format(
+            "Reconnected participant identity: migrated state from PlayerId={} to PlayerId={}.",
+            oldPlayerId, newPlayerId));
+    }
+
     static void SynchronizeXpPlayers() {
         for (auto& [playerId, tracked] : xpTrackedPlayers) {
             tracked.connected = false;
@@ -590,10 +654,38 @@ namespace PlayersTab {
 
         for (auto player : GetConnectedXpPlayers()) {
             const auto playerId = player->fields.PlayerId;
+            auto data = GetPlayerData(player);
+            const std::string puid = data != nullptr && data->fields.Puid != nullptr
+                ? convert_from_string(data->fields.Puid)
+                : "";
+            const std::string friendCode = data != nullptr && data->fields.FriendCode != nullptr
+                ? convert_from_string(data->fields.FriendCode)
+                : "";
+
+            if (!xpTrackedPlayers.contains(playerId)) {
+                const auto priorIdentity = std::find_if(
+                    xpTrackedPlayers.begin(), xpTrackedPlayers.end(),
+                    [&puid, &friendCode](const auto& entry) {
+                        const auto& tracked = entry.second;
+                        if (tracked.connected || tracked.is_host) return false;
+                        if (!puid.empty() && !tracked.puid.empty()) {
+                            return tracked.puid == puid;
+                        }
+                        return !friendCode.empty()
+                            && !tracked.friend_code.empty()
+                            && tracked.friend_code == friendCode;
+                    });
+                if (priorIdentity != xpTrackedPlayers.end()) {
+                    MigrateXpPlayerId(priorIdentity->first, playerId);
+                }
+            }
+
             auto it = xpTrackedPlayers.try_emplace(playerId).first;
             auto& tracked = it->second;
             tracked.name = XpPlayerName(player);
             tracked.is_host = IsMatchCycleHost(player);
+            if (!puid.empty()) tracked.puid = puid;
+            if (!friendCode.empty()) tracked.friend_code = friendCode;
 
             if (!tracked.is_host && tracked.needs_rejoin && tracked.disconnected_after_rejoin_request) {
                 tracked.needs_rejoin = false;
@@ -643,14 +735,16 @@ namespace PlayersTab {
 
             auto& tracked = it->second;
             tracked.was_impostor_this_round = true;
-            if (xpRoundGhostedBeforeFiftyPercentIds.contains(playerId)) {
+            if (!tracked.connected
+                || tracked.disconnected_during_farming_round
+                || xpRoundGhostedBeforeFiftyPercentIds.contains(playerId)) {
                 tracked.farmed_this_round = false;
                 tracked.has_earned_xp = false;
                 tracked.has_completed_objective = false;
                 xpFarmingCompletedPlayerIds.erase(playerId);
                 xpFarmingRetryPlayerIds.insert(playerId);
                 LogXpControllerEvent(std::format(
-                    "Farming retry: player='{}' id={} was ghosted before 50% of the round.",
+                    "Farming retry: player='{}' id={} disconnected during the round or was ghosted before 50%.",
                     tracked.name, playerId));
                 continue;
             }
@@ -716,15 +810,27 @@ namespace PlayersTab {
         return true;
     }
 
-    static bool AllConnectedPlayersEarnedXp() {
+    static bool AllTrackedPlayersEarnedXp() {
         const auto players = GetConnectedXpPlayers();
         const size_t participantCount = GetConnectedNonHostCount();
-        return participantCount > 0 && std::all_of(players.begin(), players.end(), [](PlayerControl* player) {
-            if (IsMatchCycleHost(player)) return true;
-            auto it = xpTrackedPlayers.find(player->fields.PlayerId);
-            return xpFarmingCompletedPlayerIds.contains(player->fields.PlayerId)
-                || (it != xpTrackedPlayers.end() && it->second.has_completed_objective);
-        });
+        if (participantCount == 0) return false;
+        const bool connectedParticipantsComplete = std::all_of(
+            players.begin(), players.end(), [](PlayerControl* player) {
+                if (IsMatchCycleHost(player)) return true;
+                const auto it = xpTrackedPlayers.find(player->fields.PlayerId);
+                return it != xpTrackedPlayers.end()
+                    && (xpFarmingCompletedPlayerIds.contains(player->fields.PlayerId)
+                        || it->second.has_completed_objective);
+            });
+        if (!connectedParticipantsComplete) return false;
+
+        return std::all_of(
+            xpTrackedPlayers.begin(), xpTrackedPlayers.end(), [](const auto& entry) {
+                const auto& tracked = entry.second;
+                return tracked.is_host
+                    || xpFarmingCompletedPlayerIds.contains(entry.first)
+                    || tracked.has_completed_objective;
+            });
     }
 
     static void EnterSoloLobbyKeepAlive(
@@ -1093,6 +1199,7 @@ namespace PlayersTab {
             tracked.was_impostor_this_round = false;
             tracked.farmed_this_round = false;
             tracked.demoted_to_ghost_this_round = false;
+            tracked.disconnected_during_farming_round = false;
         }
         xpRoundProtectedKillCounts.clear();
         xpRoundGhostedImpostorIds.clear();
@@ -1431,7 +1538,9 @@ namespace PlayersTab {
 
             const uint32_t currentLevel = GetXpObservedLevel(playerId);
             const auto baseline = xpRoundLevelBaselines.find(playerId);
-            const bool leveledUp = baseline != xpRoundLevelBaselines.end()
+            const bool leveledUp = tracked->second.connected
+                && !tracked->second.disconnected_during_farming_round
+                && baseline != xpRoundLevelBaselines.end()
                 && baseline->second != 0
                 && currentLevel >= baseline->second + 1
                 && !xpRoundGhostedBeforeFiftyPercentIds.contains(playerId);
@@ -1557,6 +1666,27 @@ namespace PlayersTab {
         LogXpControllerEvent(std::format(
             "Farming shield target killed: killerId={}, victimId={}, killerProtectedKillCount={}.",
             killerId, victimId, killCount));
+    }
+
+    void OnXpControllerPlayerLeft(Game::PlayerId playerId) {
+        if (!IsXpControllerRunning()) return;
+
+        auto tracked = xpTrackedPlayers.find(playerId);
+        if (tracked == xpTrackedPlayers.end()) return;
+        tracked->second.connected = false;
+        if (xpControllerPhase != XpControllerPhase::FARMING_ROUND
+            || std::find(
+                xpRoundImpostorIds.begin(), xpRoundImpostorIds.end(), playerId)
+                == xpRoundImpostorIds.end()) return;
+
+        tracked->second.disconnected_during_farming_round = true;
+        tracked->second.has_earned_xp = false;
+        tracked->second.has_completed_objective = false;
+        xpFarmingCompletedPlayerIds.erase(playerId);
+        xpFarmingRetryPlayerIds.insert(playerId);
+        LogXpControllerEvent(std::format(
+            "Assigned farming participant disconnected; completion revoked pending a later successful batch: playerId={}, name='{}'.",
+            playerId, tracked->second.name));
     }
 
     void OnXpControllerChatSent() {
@@ -1715,7 +1845,6 @@ namespace PlayersTab {
         xpNoActiveFarmingImpostors = false;
         xpLegacyFarmingRoundFailed = false;
         xpRoundStartedAt = {};
-        xpForceDrainAfterDeferredRetry = false;
         if (xpProgressMode != XpProgressMode::LegacyChat) {
             CaptureXpRoundLevelBaselines(true);
         }
@@ -1881,6 +2010,7 @@ namespace PlayersTab {
     }
 
     static void BeginXpFarmingConfirmationWindow() {
+        xpFarmingConfirmationPending = true;
         std::string assignedNames;
         std::string assignedDetails;
         for (size_t assignedIndex = 0; assignedIndex < xpRoundImpostorIds.size(); ++assignedIndex) {
@@ -1943,9 +2073,12 @@ namespace PlayersTab {
             const auto response = xpFarmingConfirmationResponses.find(playerId);
             auto tracked = xpTrackedPlayers.find(playerId);
             if (tracked == xpTrackedPlayers.end() || tracked->second.is_host) continue;
-            const bool completed = !xpRoundGhostedBeforeFiftyPercentIds.contains(playerId)
+            const bool participantAvailable = tracked->second.connected
+                && !tracked->second.disconnected_during_farming_round;
+            const bool completed = participantAvailable
+                && !xpRoundGhostedBeforeFiftyPercentIds.contains(playerId)
                 && (response == xpFarmingConfirmationResponses.end()
-                    ? tracked->second.connected
+                    ? true
                     : response->second);
             const size_t assignedIndex = static_cast<size_t>(std::distance(
                 xpRoundImpostorIds.begin(),
@@ -1956,9 +2089,11 @@ namespace PlayersTab {
             if (resultSummary != "FARMING RESULT: ") resultSummary += ", ";
             const std::string result = xpRoundGhostedBeforeFiftyPercentIds.contains(playerId)
                 ? "RETRY (ghosted before 50%)"
+                : (!participantAvailable
+                    ? "RETRY (disconnected)"
                 : (response == xpFarmingConfirmationResponses.end()
-                    ? (completed ? "DONE (no reply)" : "RETRY (disconnected)")
-                    : (completed ? "DONE" : "RETRY"));
+                    ? "DONE (no reply)"
+                    : (completed ? "DONE" : "RETRY")));
             resultSummary += std::format("{} {}", name, result);
             tracked->second.has_earned_xp = completed;
             tracked->second.has_completed_objective = completed;
@@ -2222,9 +2357,8 @@ namespace PlayersTab {
                     if (xpDeferredFarmingRetryActive
                         && xpDeferredFarmingRetryIds.empty()) {
                         xpDeferredFarmingRetryActive = false;
-                        xpForceDrainAfterDeferredRetry = true;
                         LogXpControllerEvent(
-                            "Deferred final retry failed; moving directly to draining.");
+                            "Deferred retry failed; keeping the participants eligible for normal farming batches.");
                     }
                     xpRoundShieldFailure = false;
                     xpNoActiveFarmingImpostors = false;
@@ -2276,7 +2410,6 @@ namespace PlayersTab {
         xpDeferredFarmingRetryIds.clear();
         xpDeferredFarmingRetryUsedIds.clear();
         xpDeferredFarmingRetryActive = false;
-        xpForceDrainAfterDeferredRetry = false;
         for (auto& [playerId, tracked] : xpTrackedPlayers) {
             if (tracked.is_host) continue;
             tracked.has_earned_xp = false;
@@ -2312,18 +2445,6 @@ namespace PlayersTab {
             LogXpControllerEvent(std::format(
                 "Queued post-grace safety warnings for {} ghosted farming Impostor(s).",
                 xpRoundGhostedImpostorIds.size()));
-        }
-        if (xpForceDrainAfterDeferredRetry) {
-            xpForceDrainAfterDeferredRetry = false;
-            xpDrainRoundsCompleted = 0;
-            xpDrainRoundsTarget = GetXpDrainRoundsTarget();
-            xpControllerPhase = XpControllerPhase::ROLLOVER_LOOP;
-            xpControllerStage = XpControllerStage::LobbyDelay;
-            xpControllerDeadline = std::chrono::steady_clock::now()
-                + std::chrono::seconds(xpDrainBetweenRoundRejoinSeconds);
-            LogXpControllerEvent(
-                "Final deferred retry failed; proceeding to draining after the configured lobby delay.");
-            return;
         }
         if (xpDrainRejoinGracePending) {
             xpDrainRejoinGracePending = false;
@@ -2364,10 +2485,6 @@ namespace PlayersTab {
                     "Level-mode farming lobby delay complete; evaluating completed players.");
                 return;
             }
-            if (xpFarmingConfirmationMode) {
-                BeginXpFarmingConfirmationWindow();
-                return;
-            }
             if (xpProgressMode == XpProgressMode::LegacyChat
                 && xpLegacyFarmingRoundFailed) {
                 xpLegacyFarmingRoundFailed = false;
@@ -2375,6 +2492,10 @@ namespace PlayersTab {
                 xpControllerStage = XpControllerStage::EvaluateLobby;
                 LogXpControllerEvent(
                     "Failed legacy farming round excluded the batch from completion.");
+                return;
+            }
+            if (xpFarmingConfirmationMode) {
+                BeginXpFarmingConfirmationWindow();
                 return;
             }
             const auto priorCompleted = std::count_if(xpTrackedPlayers.begin(), xpTrackedPlayers.end(), [](const auto& entry) {
@@ -2385,7 +2506,7 @@ namespace PlayersTab {
                 return !entry.second.is_host && entry.second.has_completed_objective;
             });
             LogXpControllerEvent(std::format(
-                "Farming round completion: participants={}, completedBefore={}, completedAfter={}; every non-host ID in the immutable Impostor assignment is credited after a started round returns to the lobby.",
+                "Farming round completion: participants={}, completedBefore={}, completedAfter={}; disconnected or pre-50% ghosted assignments remain incomplete.",
                 GetConnectedNonHostCount(), priorCompleted, completed));
             if (xpDrainReturnAfterFarmingBreak) {
                 ContinueXpDrainBonusBatchesOrResume();
@@ -2393,6 +2514,13 @@ namespace PlayersTab {
             }
             xpControllerPhase = XpControllerPhase::LOBBY_EVAL;
             xpControllerStage = XpControllerStage::EvaluateLobby;
+            return;
+        }
+
+        if (xpControllerPhase == XpControllerPhase::LOBBY_EVAL) {
+            xpControllerStage = XpControllerStage::EvaluateLobby;
+            LogXpControllerEvent(
+                "Farming evaluation lobby delay completed; checking participant completion again.");
             return;
         }
 
@@ -2568,7 +2696,6 @@ namespace PlayersTab {
         xpControllerSnapshot.deferredFarmingRetryIds = xpDeferredFarmingRetryIds;
         xpControllerSnapshot.deferredFarmingRetryUsedIds = xpDeferredFarmingRetryUsedIds;
         xpControllerSnapshot.deferredFarmingRetryActive = xpDeferredFarmingRetryActive;
-        xpControllerSnapshot.forceDrainAfterDeferredRetry = xpForceDrainAfterDeferredRetry;
         xpControllerSnapshot.protectedKillCounts = xpRoundProtectedKillCounts;
         xpControllerSnapshot.ghostedImpostorIds = xpRoundGhostedImpostorIds;
         xpControllerSnapshot.farmingSafetyWarningsPending =
@@ -2639,8 +2766,6 @@ namespace PlayersTab {
             xpControllerSnapshot.deferredFarmingRetryUsedIds;
         xpDeferredFarmingRetryActive =
             xpControllerSnapshot.deferredFarmingRetryActive;
-        xpForceDrainAfterDeferredRetry =
-            xpControllerSnapshot.forceDrainAfterDeferredRetry;
         xpRoundProtectedKillCounts = xpControllerSnapshot.protectedKillCounts;
         xpRoundGhostedImpostorIds = xpControllerSnapshot.ghostedImpostorIds;
         xpFarmingSafetyWarningsPending =
@@ -2995,6 +3120,7 @@ namespace PlayersTab {
     static void ReconcileXpRoundRolesAtStart() {
         if (xpControllerPhase != XpControllerPhase::FARMING_ROUND) return;
 
+        SynchronizeXpPlayers();
         std::vector<Game::PlayerId> actualImpostorIds;
         size_t correctedRoleCount = 0;
         for (auto player : GetConnectedXpPlayers()) {
@@ -3078,7 +3204,6 @@ namespace PlayersTab {
         xpDeferredFarmingRetryIds.clear();
         xpDeferredFarmingRetryUsedIds.clear();
         xpDeferredFarmingRetryActive = false;
-        xpForceDrainAfterDeferredRetry = false;
         xpRoundImpostorNames.clear();
         xpFarmingConfirmationResponses.clear();
         xpPendingChatMessages.clear();
@@ -3123,10 +3248,19 @@ namespace PlayersTab {
         xpFarmingCycleAnnouncementPending = true;
         State.ForceEndAfterStartTriggered = false;
         for (auto player : GetConnectedXpPlayers()) {
+            auto data = GetPlayerData(player);
             auto& tracked = xpTrackedPlayers[player->fields.PlayerId];
             tracked.name = XpPlayerName(player);
             tracked.is_host = IsMatchCycleHost(player);
             tracked.connected = true;
+            if (data != nullptr) {
+                if (data->fields.Puid != nullptr) {
+                    tracked.puid = convert_from_string(data->fields.Puid);
+                }
+                if (data->fields.FriendCode != nullptr) {
+                    tracked.friend_code = convert_from_string(data->fields.FriendCode);
+                }
+            }
         }
         if (xpTrackedPlayers.empty()) {
             Toasts::AddToast("XP Controller", "No connected players are available.", ImVec4(1.f, 0.3f, 0.3f, 1.f));
@@ -3456,7 +3590,7 @@ namespace PlayersTab {
             break;
         case XpControllerStage::SoloLobbyKeepAlive:
             break;
-        case XpControllerStage::EvaluateLobby:
+        case XpControllerStage::EvaluateLobby: {
             if (xpDrainReturnAfterFarmingBreak
                 && !xpDrainFarmingBonusPlayerIds.empty()) {
                 LogXpControllerEvent(std::format(
@@ -3465,10 +3599,11 @@ namespace PlayersTab {
                 BeginXpFarmingRound();
                 break;
             }
+            const bool allParticipantsComplete = AllTrackedPlayersEarnedXp();
             LogXpControllerEvent(std::format(
-                "Evaluating farming results: allNonHostObjectivesComplete={}. {}",
-                AllConnectedPlayersEarnedXp(), BuildXpControllerDiagnostics()));
-            if (AllConnectedPlayersEarnedXp()) {
+                "Evaluating farming results: allTrackedNonHostObjectivesComplete={}. {}",
+                allParticipantsComplete, BuildXpControllerDiagnostics()));
+            if (allParticipantsComplete) {
                 xpDrainRoundsCompleted = 0;
                 xpDrainRoundsTarget = GetXpDrainRoundsTarget();
                 xpControllerPhase = XpControllerPhase::ROLLOVER_LOOP;
@@ -3492,7 +3627,7 @@ namespace PlayersTab {
                 }
                 if (xpProgressMode == XpProgressMode::LegacyChat) {
                     LogXpControllerEvent(std::format(
-                        "All connected non-host participants completed farming; beginning {} drain mode (target={} rounds, {} per farming minute, farmingDuration={}s). {}",
+                        "All tracked non-host participants completed farming; beginning {} drain mode (target={} rounds, {} per farming minute, farmingDuration={}s). {}",
                         xpDrainUntilStopMode ? "STOP-controlled" : "fixed-count",
                         xpDrainRoundsTarget, xpDrainRoundsPerMinute, xpFarmingDurationSeconds,
                         BuildXpControllerDiagnostics()));
@@ -3516,9 +3651,27 @@ namespace PlayersTab {
             }
             else {
                 BroadcastXpControllerSummary();
-                BeginXpFarmingRound();
+                const auto connectedPlayers = GetConnectedXpPlayers();
+                const bool connectedParticipantNeedsFarming = std::any_of(
+                    connectedPlayers.begin(), connectedPlayers.end(), [](PlayerControl* player) {
+                        if (IsMatchCycleHost(player)) return false;
+                        const auto tracked = xpTrackedPlayers.find(player->fields.PlayerId);
+                        return tracked == xpTrackedPlayers.end()
+                            || (!xpFarmingCompletedPlayerIds.contains(player->fields.PlayerId)
+                                && !tracked->second.has_completed_objective);
+                    });
+                if (connectedParticipantNeedsFarming) {
+                    BeginXpFarmingRound();
+                }
+                else {
+                    xpControllerStage = XpControllerStage::LobbyDelay;
+                    xpControllerDeadline = now + xpFarmingLobbyGraceDuration;
+                    LogXpControllerEvent(
+                        "All connected participants are complete; waiting for disconnected unfinished participants to rejoin before rollover.");
+                }
             }
             break;
+        }
         }
     }
 

@@ -71,6 +71,7 @@ namespace PlayersTab {
 	void TickXpController();
 	void OnXpControllerGameStarted();
 	void OnXpControllerProtectedCrewmateKilled(Game::PlayerId killerId, Game::PlayerId victimId);
+	void OnXpControllerPlayerLeft(Game::PlayerId playerId);
 	void OnXpControllerChatSent();
 	void OnXpControllerChatMessage(Game::PlayerId playerId, const std::string& message);
 	bool ShouldHoldXpDrainMeeting();

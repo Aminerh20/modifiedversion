@@ -1843,6 +1843,7 @@ void dAmongUsClient_OnPlayerLeft(AmongUsClient* __this, ClientData* data, Discon
             Log.Debug(playerName + " left by reason: " + stringReason);
 
             uint8_t playerId = data->fields.Character->fields.PlayerId;
+            PlayersTab::OnXpControllerPlayerLeft(playerId);
 
             if (State.playerToAttach.get_PlayerId() == playerId)
                 State.playerToAttach = {};
