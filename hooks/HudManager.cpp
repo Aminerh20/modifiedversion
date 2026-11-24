@@ -4,6 +4,7 @@
 #include "toasts.hpp"
 #include "utility.h"
 #include "game.h"
+#include "../gui/tabs/players_tab.h"
 
 static std::string strToLower(std::string str) {
     std::string new_str = "";
@@ -578,11 +579,14 @@ void* dShhhBehaviour_PlayAnimation(ShhhBehaviour* __this, MethodInfo* method) {
             if (shhhEmblemObject != NULL) {
                 GameObject_SetActive(shhhEmblemObject, false, NULL);
             }
+            PlayersTab::OnXpControllerShushAnimation();
             return nullptr;
         }
     }
 
-    return ShhhBehaviour_PlayAnimation(__this, NULL);
+    void* result = ShhhBehaviour_PlayAnimation(__this, NULL);
+    PlayersTab::OnXpControllerShushAnimation();
+    return result;
 }
 
 void dFriendsListButton_Update(FriendsListButton* __this, MethodInfo* method) {

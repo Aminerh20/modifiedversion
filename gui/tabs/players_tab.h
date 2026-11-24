@@ -74,6 +74,7 @@ namespace PlayersTab {
 	void RecordXpLevelLifecycleEvent(const std::string& event, PlayerControl* player = nullptr, const std::string& details = "");
 	void TickXpController();
 	void OnXpControllerGameStarted();
+	void OnXpControllerShushAnimation();
 	void OnXpControllerProtectedCrewmateKilled(Game::PlayerId killerId, Game::PlayerId victimId);
 	void OnShieldBreakAttempt(PlayerControl* killer, PlayerControl* protectedPlayer);
 	void ClearShieldBreakCounts();

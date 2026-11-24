@@ -358,5 +358,9 @@ MigrationBackup/
 # gitparams.h is used for github workflow (we don't need to push it)
 gitparams.h
 
-# Local Match Cycle handoff notes
+# Local Match Cycle handoff notes and agent guidance
 /MATCH-CYCLE-README.md
+/MATCH-CYCLE-PROGRESS.md
+/MATCH-CYCLE-ARCHITECTURE.md
+/AGENTS.md
+/.github/skills/match-cycle/

@@ -86,11 +86,13 @@ namespace PlayersTab {
         bool disconnected_after_rejoin_request = false;
         bool disconnected_during_farming_round = false;
         bool disconnected_during_drain_round = false;
+        bool level_normalization_deferred = false;
         bool was_impostor_this_round = false;
         bool farmed_this_round = false;
         bool demoted_to_ghost_this_round = false;
         bool has_lobby_base_level = false;
         uint32_t lobby_base_level = 0;
+        bool level_normalization_pre_match_level_known = false;
         bool drain_plateaued = false;
         bool level_patch_rejoin_required = false;
         bool drain_eligible = true;
@@ -170,6 +172,10 @@ namespace PlayersTab {
         XpControllerStage soloResumeStage = XpControllerStage::PreparingRound;
         bool soloResumeDeadlineIsMax = false;
         int64_t soloResumeDeadlineRemainingMs = 0;
+        bool levelNormalizationPending = false;
+        bool levelNormalizationRoundStarted = false;
+        bool levelNormalizationRoundActive = false;
+        bool levelNormalizationRepeatPending = false;
     };
 
     static XpControllerPhase xpControllerPhase = XpControllerPhase::STOPPED;
@@ -250,6 +256,10 @@ namespace PlayersTab {
     static bool xpSoloResumeDeadlineIsMax = false;
     static std::chrono::steady_clock::time_point xpSoloResumeDeadline;
     static std::chrono::steady_clock::time_point xpSoloKeepAliveStartedAt;
+    static bool xpLevelNormalizationPending = false;
+    static bool xpLevelNormalizationRoundStarted = false;
+    static bool xpLevelNormalizationRoundActive = false;
+    static bool xpLevelNormalizationRepeatPending = false;
     static bool xpFarmingConfirmationPending = false;
     static bool xpDrainStopRequested = false;
     static size_t xpDrainStopEligibleCount = 0;
@@ -276,6 +286,7 @@ namespace PlayersTab {
     static constexpr auto xpDrainFarmingPromptResponseDuration = std::chrono::seconds(15);
     static constexpr auto xpFarmingAnnouncementDelay = std::chrono::seconds(10);
     static constexpr auto xpDrainAnnouncementDelay = std::chrono::seconds(30);
+    static constexpr auto xpDrainStartAnnouncementDelay = std::chrono::seconds(10);
     static constexpr auto xpChatSendInterval = std::chrono::seconds(3);
     static int xpFarmingDurationSeconds = 180;
     static int xpDrainRoundsPerMinute = 7;
@@ -397,9 +408,11 @@ namespace PlayersTab {
 
     static std::string BuildXpControllerDiagnostics() {
         std::string details = std::format(
-            "phase={}, stage={}, inLobby={}, inGame={}, connectedNonHost={}, trackedPlayers={}",
+            "phase={}, stage={}, inLobby={}, inGame={}, connectedNonHost={}, trackedPlayers={}, levelNormalizationPending={}, levelNormalizationRoundStarted={}, levelNormalizationRoundActive={}, levelNormalizationRepeatPending={}",
             XpControllerPhaseName(xpControllerPhase), XpControllerStageName(xpControllerStage),
-            IsInLobby(), IsInGame(), GetConnectedNonHostCount(), xpTrackedPlayers.size());
+            IsInLobby(), IsInGame(), GetConnectedNonHostCount(), xpTrackedPlayers.size(),
+            xpLevelNormalizationPending, xpLevelNormalizationRoundStarted,
+            xpLevelNormalizationRoundActive, xpLevelNormalizationRepeatPending);
         const auto connectedPlayers = GetConnectedXpPlayers();
         for (auto player : connectedPlayers) {
             const auto playerId = player->fields.PlayerId;
@@ -498,6 +511,11 @@ namespace PlayersTab {
     }
 
     static void TickXpControllerChat() {
+        const auto now = std::chrono::steady_clock::now();
+        if (xpLevelNormalizationPending && xpLevelNormalizationRoundStarted
+            && (xpLevelNormalizationRoundActive || now < xpControllerDeadline)) {
+            return;
+        }
         if (!xpDrainMeetingAnnouncementPending
             && !xpPendingInGameChatMessages.empty()
             && IsInGame()
@@ -529,7 +547,6 @@ namespace PlayersTab {
         }
         if (xpPendingChatMessages.empty() || !IsInLobby()) return;
 
-        const auto now = std::chrono::steady_clock::now();
         if (now < xpNextChatSendAt || State.ChatCooldown < 3.f) return;
         if (!CanSendXpControllerChat()) return;
 
@@ -742,13 +759,35 @@ namespace PlayersTab {
                     "Participant rejoined after a level rejoin request; drain eligibility restored: playerId={}, name='{}'.",
                     playerId, tracked.name));
             }
-            if (!tracked.is_host && IsInLobby() && !tracked.has_lobby_base_level) {
+            const bool captureNormalizationLevel =
+                xpLevelNormalizationPending && xpLevelNormalizationRoundActive;
+            if (!tracked.is_host
+                && (IsInLobby() || captureNormalizationLevel)
+                && !tracked.has_lobby_base_level
+                && !(xpLevelNormalizationPending
+                    && xpLevelNormalizationRoundStarted
+                    && !xpLevelNormalizationRoundActive)) {
                 const uint32_t level = GetXpObservedLevel(playerId);
                 if (level != 0) {
                     tracked.lobby_base_level = level;
                     tracked.has_lobby_base_level = true;
+                    tracked.level_normalization_pre_match_level_known =
+                        xpLevelNormalizationPending
+                        && !xpLevelNormalizationRoundStarted;
                     LogXpControllerEvent(std::format(
-                        "Captured lobby base level: playerId={}, name='{}', level={}.",
+                        "Captured {} level baseline: playerId={}, name='{}', level={}.",
+                        IsInLobby() ? "lobby" : "normalization-round",
+                        playerId, tracked.name, level));
+                }
+            }
+            if (!tracked.is_host && tracked.level_normalization_deferred) {
+                const uint32_t level = GetXpObservedLevel(playerId);
+                if (level == 1
+                    || (level != 0 && tracked.has_lobby_base_level
+                        && level < tracked.lobby_base_level)) {
+                    tracked.level_normalization_deferred = false;
+                    LogXpControllerEvent(std::format(
+                        "Deferred normalization participant reached a reset level and is eligible for the next farming batch: playerId={}, name='{}', level={}.",
                         playerId, tracked.name, level));
                 }
             }
@@ -985,6 +1024,10 @@ namespace PlayersTab {
         xpPauseDeadlineRemainingMs = 0;
         xpControllerSnapshot.valid = false;
         xpHostAuthorityLostAt = {};
+        xpLevelNormalizationPending = false;
+        xpLevelNormalizationRoundStarted = false;
+        xpLevelNormalizationRoundActive = false;
+        xpLevelNormalizationRepeatPending = false;
         xpRoundImpostorIds.clear();
         xpRoundImpostorNames.clear();
         xpFarmingConfirmationResponses.clear();
@@ -1173,12 +1216,13 @@ namespace PlayersTab {
         }
 
         const std::string drainStartMessage = xpDrainUntilStopMode
-            ? "Draining starts in 30s. Type STOP only when you are done."
+            ? "Auto-drain starting. Type STOP only when you are done."
             : std::format(
-                "Auto-drain starts in 30s: {} rounds, {}s between; each ends after 35s.",
+                "Auto-drain starting: {} rounds, {}s between; each ends after 35s.",
                 GetXpDrainRoundsTarget(), xpDrainBetweenRoundRejoinSeconds);
         estimate += GetXpChatWaitSeconds(
             CountXpControllerChatChunks(drainStartMessage), 0) * 2;
+        estimate += xpDrainStartAnnouncementDelay.count();
         estimate += static_cast<int64_t>(drainRounds) * xpRolloverDuration.count();
         if (drainRounds > 1) {
             estimate += static_cast<int64_t>(drainRounds - 1) * xpDrainBetweenRoundRejoinSeconds;
@@ -1296,6 +1340,7 @@ namespace PlayersTab {
                 auto it = xpTrackedPlayers.find(player->fields.PlayerId);
                 if (it == xpTrackedPlayers.end()
                     || (unearnedOnly && it->second.needs_rejoin)
+                    || (unearnedOnly && it->second.level_normalization_deferred)
                     || (unearnedOnly && (xpFarmingCompletedPlayerIds.contains(player->fields.PlayerId)
                         || it->second.has_completed_objective))
                     || (unearnedOnly && skipAttempted && it->second.has_farming_attempt)) continue;
@@ -1318,7 +1363,8 @@ namespace PlayersTab {
                     continue;
                 }
                 const auto tracked = xpTrackedPlayers.find(playerId);
-                if (tracked == xpTrackedPlayers.end() || tracked->second.needs_rejoin)
+                if (tracked == xpTrackedPlayers.end() || tracked->second.needs_rejoin
+                    || tracked->second.level_normalization_deferred)
                     continue;
                 if (impostors.size() >= static_cast<size_t>((std::max)(teamCap, 0))) {
                     stillConnected.push_back(playerId);
@@ -1344,6 +1390,7 @@ namespace PlayersTab {
                         || xpFarmingCompletedPlayerIds.contains(playerId)
                         || it->second.has_completed_objective
                         || it->second.needs_rejoin
+                        || it->second.level_normalization_deferred
                         || (!retryPriority && it->second.has_farming_attempt)
                         || (retryPriority != xpFarmingRetryPlayerIds.contains(playerId))) continue;
                     impostors.push_back(player);
@@ -1375,6 +1422,7 @@ namespace PlayersTab {
                     || xpFarmingCompletedPlayerIds.contains(playerId)
                     || tracked->second.has_completed_objective
                     || tracked->second.needs_rejoin
+                    || tracked->second.level_normalization_deferred
                     || xpDeferredFarmingRetryIds.contains(playerId)) continue;
                 impostors.push_back(player);
                 lastSelectedIndex = index;
@@ -2201,7 +2249,8 @@ namespace PlayersTab {
 
     static void ReconcileMatchCycleShields() {
         if (!IsXpControllerRunning() || !IsHost()
-            || xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP) return;
+            || xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP
+            || xpLevelNormalizationPending) return;
         if (matchCycleProtectionOwnsSettings) {
             protectionIntervalMs =
                 static_cast<int>(GetMatchCycleUpdateInterval().count());
@@ -2329,6 +2378,181 @@ namespace PlayersTab {
         }
     }
 
+    static void BeginXpLevelNormalizationRound() {
+        if (!IsInLobby() || !IsHost()) return;
+
+        SynchronizeXpPlayers();
+        bool haveAllInitialLevels = true;
+        for (auto player : GetConnectedXpPlayers()) {
+            if (IsMatchCycleHost(player)) continue;
+            const auto playerId = player->fields.PlayerId;
+            const uint32_t level = GetXpObservedLevel(playerId);
+            auto tracked = xpTrackedPlayers.find(playerId);
+            if (level == 0 || tracked == xpTrackedPlayers.end()
+                || !tracked->second.has_lobby_base_level) {
+                haveAllInitialLevels = false;
+                continue;
+            }
+        }
+        if (!haveAllInitialLevels) {
+            xpControllerStage = XpControllerStage::LobbyDelay;
+            xpControllerDeadline = std::chrono::steady_clock::now()
+                + std::chrono::seconds(1);
+            LogXpControllerEvent(
+                "Level normalization deferred until every connected participant has a readable pre-round level.");
+            return;
+        }
+
+        xpLevelNormalizationRoundStarted = true;
+        xpLevelNormalizationRoundActive = true;
+        xpRoundStartedAt = {};
+        xpRoundLevelBaselines.clear();
+        xpRoundLevelPeaks.clear();
+        xpRoundProtectedKillCounts.clear();
+        xpRoundGhostedImpostorIds.clear();
+        xpRoundGhostedBeforeFiftyPercentIds.clear();
+        xpRoundShieldFailure = false;
+        xpRoundShieldFailureWaived = false;
+        xpRoundFailureDetectedBeforeFiftyPercent = false;
+        xpNoActiveFarmingImpostors = false;
+        xpControllerPhase = XpControllerPhase::FARMING_ROUND;
+        xpControllerStage = XpControllerStage::PreparingRound;
+        xpControllerDeadline = std::chrono::steady_clock::now() + xpRoundPrepareDelay;
+        LogXpControllerEvent(std::format(
+            "Starting a level-normalization match for this full farming cycle. {}",
+            BuildXpControllerDiagnostics()));
+    }
+
+    static void ContinueXpLevelNormalization() {
+        if (!IsInLobby() || !IsHost()) return;
+        SynchronizeXpPlayers();
+
+        if (xpLevelNormalizationRepeatPending) {
+            if (!AllRequestedPlayersRejoined()
+                || !xpPendingChatMessages.empty()
+                || std::chrono::steady_clock::now() < xpPostChatDeadline) {
+                xpControllerStage = XpControllerStage::LobbyDelay;
+                xpControllerDeadline = std::chrono::steady_clock::now()
+                    + std::chrono::seconds(1);
+                return;
+            }
+            xpLevelNormalizationRepeatPending = false;
+            xpLevelNormalizationRoundStarted = false;
+            xpLevelNormalizationRoundActive = false;
+            LogXpControllerEvent(
+                "All participants requested for rejoin have returned; repeating the level-normalization match.");
+            BeginXpLevelNormalizationRound();
+            return;
+        }
+
+        size_t participantCount = 0;
+        size_t confirmedPatchedLevelCount = 0;
+        std::vector<Game::PlayerId> unresolvedPlayers;
+        for (auto& [playerId, tracked] : xpTrackedPlayers) {
+            if (tracked.is_host) continue;
+            ++participantCount;
+
+            const uint32_t currentLevel = tracked.connected
+                ? GetXpObservedLevel(playerId) : 0;
+            if (currentLevel == 1) {
+                if (!tracked.has_lobby_base_level) {
+                    tracked.lobby_base_level = 1;
+                    tracked.has_lobby_base_level = true;
+                }
+                tracked.level_normalization_deferred = false;
+                tracked.needs_rejoin = false;
+                tracked.disconnected_after_rejoin_request = false;
+                tracked.level_patch_rejoin_required = false;
+                continue;
+            }
+            if (currentLevel != 0 && tracked.has_lobby_base_level
+                && currentLevel < tracked.lobby_base_level) {
+                tracked.level_normalization_deferred = false;
+                tracked.needs_rejoin = false;
+                tracked.level_patch_rejoin_required = false;
+                tracked.disconnected_after_rejoin_request = false;
+                continue;
+            }
+            if (!tracked.has_lobby_base_level && currentLevel != 0) {
+                tracked.lobby_base_level = currentLevel;
+                tracked.has_lobby_base_level = true;
+                LogXpControllerEvent(std::format(
+                    "Captured a post-normalization reference for a participant without a pre-round sample: playerId={}, name='{}', level={}; level 1 is required for immediate farming eligibility.",
+                    playerId, tracked.name, currentLevel));
+            }
+            if (currentLevel != 0
+                && tracked.level_normalization_pre_match_level_known
+                && currentLevel >= tracked.lobby_base_level) {
+                ++confirmedPatchedLevelCount;
+            }
+            unresolvedPlayers.push_back(playerId);
+        }
+
+        if (participantCount == 0 || GetConnectedNonHostCount() == 0) {
+            xpControllerStage = XpControllerStage::LobbyDelay;
+            xpControllerDeadline = std::chrono::steady_clock::now()
+                + std::chrono::seconds(1);
+            return;
+        }
+
+        if (confirmedPatchedLevelCount > 0
+            && confirmedPatchedLevelCount * 2 >= participantCount) {
+            xpLevelNormalizationRepeatPending = true;
+            for (const auto playerId : unresolvedPlayers) {
+                auto& tracked = xpTrackedPlayers[playerId];
+                tracked.level_normalization_deferred = false;
+                const uint32_t currentLevel = tracked.connected
+                    ? GetXpObservedLevel(playerId) : 0;
+                tracked.level_patch_rejoin_required =
+                    tracked.level_normalization_pre_match_level_known
+                    && currentLevel != 0
+                    && currentLevel >= tracked.lobby_base_level;
+                if (tracked.needs_rejoin) continue;
+                tracked.needs_rejoin = true;
+                tracked.disconnected_after_rejoin_request = false;
+                QueueXpControllerChat(std::format(
+                    "{}'s level has not reset; rejoin the lobby before normalization repeats.",
+                    XpControllerChatName(tracked.name)));
+                LogXpControllerEvent(std::format(
+                    "Requesting rejoin before repeating normalization: playerId={}, name='{}', connected={}, savedLevel={}, currentLevel={}.",
+                    playerId, tracked.name, tracked.connected,
+                    tracked.lobby_base_level, tracked.connected ? GetXpObservedLevel(playerId) : 0));
+            }
+            xpControllerStage = XpControllerStage::LobbyDelay;
+            xpControllerDeadline = std::chrono::steady_clock::now()
+                + std::chrono::seconds(1);
+            LogXpControllerEvent(std::format(
+                "At least half of the tracked non-host roster has a confirmed unchanged/raised level ({}/{}); waiting for requested rejoins before repeating normalization.",
+                confirmedPatchedLevelCount, participantCount));
+            return;
+        }
+
+        for (const auto playerId : unresolvedPlayers) {
+            xpTrackedPlayers[playerId].level_normalization_deferred = true;
+            LogXpControllerEvent(std::format(
+                "Deferring participant from the first farming batch; they remain eligible for a later batch after their level resets: playerId={}, name='{}'.",
+                playerId, xpTrackedPlayers[playerId].name));
+        }
+        xpLevelNormalizationPending = false;
+        xpLevelNormalizationRoundStarted = false;
+        xpLevelNormalizationRoundActive = false;
+        LogXpControllerEvent(std::format(
+            "Normalization complete for {}/{} tracked participants; starting farming with unresolved minority deferred from the first batch. {}",
+            participantCount - unresolvedPlayers.size(), participantCount,
+            BuildXpControllerDiagnostics()));
+        BeginXpFarmingRound();
+    }
+
+    static void HandleXpLevelNormalizationReturnedToLobby() {
+        EndXpFarmingRound();
+        xpLevelNormalizationRoundActive = false;
+        xpControllerStage = XpControllerStage::LobbyDelay;
+        xpControllerDeadline = std::chrono::steady_clock::now()
+            + xpFarmingLobbyGraceDuration;
+        LogXpControllerEvent(
+            "Normalization match ended; waiting the 20-second lobby grace for participants to rejoin and receive their level reset before sending any chat messages.");
+    }
+
     static void BeginXpFarmingRound() {
         if (!IsInLobby() || !IsHost()) return;
         xpControllerPhase = XpControllerPhase::FARMING_ROUND;
@@ -2338,6 +2562,16 @@ namespace PlayersTab {
                 + std::chrono::seconds(1);
             LogXpControllerEvent(
                 "Farming deferred because no participants are connected; the cycle remains active.");
+            return;
+        }
+        if (xpLevelNormalizationPending) {
+            if (xpLevelNormalizationRoundStarted) {
+                xpControllerStage = XpControllerStage::LobbyDelay;
+                xpControllerDeadline = std::chrono::steady_clock::now()
+                    + std::chrono::seconds(1);
+                return;
+            }
+            BeginXpLevelNormalizationRound();
             return;
         }
         if (!ConfigureMatchCycleTeams(true)) return;
@@ -2469,6 +2703,7 @@ namespace PlayersTab {
 
     bool AssignXpControllerRoles() {
         if (!IsXpControllerRunning() || !IsHost()) return false;
+        if (xpLevelNormalizationPending) return false;
 
         if (!xpRoleAssignmentStarted && !xpRoleAssignmentComplete) {
             SynchronizeXpPlayers();
@@ -2694,7 +2929,20 @@ namespace PlayersTab {
     }
 
     static void HandleXpRoundReturnedToLobby() {
+        if (xpLevelNormalizationRoundActive) {
+            HandleXpLevelNormalizationReturnedToLobby();
+            return;
+        }
         EndXpFarmingRound();
+        if (xpControllerPhase == XpControllerPhase::FARMING_ROUND) {
+            for (auto& [playerId, tracked] : xpTrackedPlayers) {
+                if (!tracked.level_normalization_deferred) continue;
+                tracked.level_normalization_deferred = false;
+                LogXpControllerEvent(std::format(
+                    "First farming batch ended; participant is now eligible for a later farming batch: playerId={}, name='{}'.",
+                    playerId, tracked.name));
+            }
+        }
         if (xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP) {
             ++xpDrainRoundsCompleted;
             if (xpProgressMode != XpProgressMode::LegacyChat) {
@@ -2893,6 +3141,11 @@ namespace PlayersTab {
             tracked.has_farming_attempt = false;
             tracked.needs_rejoin = false;
             tracked.disconnected_after_rejoin_request = false;
+            tracked.level_normalization_deferred = false;
+            tracked.has_lobby_base_level = false;
+            tracked.lobby_base_level = 0;
+            tracked.level_normalization_pre_match_level_known = false;
+            tracked.level_patch_rejoin_required = false;
         }
         xpFarmingCompletedPlayerIds.clear();
         xpRoundImpostorIds.clear();
@@ -2905,15 +3158,31 @@ namespace PlayersTab {
             BuildXpControllerDiagnostics()));
         NotifyXpController(
             "Farming cycle restarting",
-            std::format("Drain complete. Farming rounds: {}.",
-                FormatXpFarmingDuration(xpFarmingDurationSeconds)),
+            "Drain complete. Resetting levels before the next farming cycle.",
             ImVec4(0.f, 1.f, 0.5f, 1.f));
         xpControllerPhase = XpControllerPhase::FARMING_ROUND;
+        xpLevelNormalizationPending = true;
+        xpLevelNormalizationRoundStarted = false;
+        xpLevelNormalizationRoundActive = false;
+        xpLevelNormalizationRepeatPending = false;
         xpFarmingCycleAnnouncementPending = true;
         BeginXpFarmingRound();
     }
 
     static void ProcessXpLobbyDelay() {
+        if (xpLevelNormalizationPending) {
+            if (xpLevelNormalizationRoundStarted) {
+                ContinueXpLevelNormalization();
+            }
+            else if (GetConnectedNonHostCount() == 0) {
+                xpControllerDeadline = std::chrono::steady_clock::now()
+                    + std::chrono::seconds(1);
+            }
+            else {
+                BeginXpLevelNormalizationRound();
+            }
+            return;
+        }
         if (xpFarmingSafetyWarningsPending) {
             QueueXpControllerChat(
                 "Impostors: stay separate; never have two Impostors farm one Crewmate.");
@@ -3230,6 +3499,13 @@ namespace PlayersTab {
             : (std::max)(int64_t{0},
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     xpSoloResumeDeadline - std::chrono::steady_clock::now()).count());
+        xpControllerSnapshot.levelNormalizationPending = xpLevelNormalizationPending;
+        xpControllerSnapshot.levelNormalizationRoundStarted =
+            xpLevelNormalizationRoundStarted;
+        xpControllerSnapshot.levelNormalizationRoundActive =
+            xpLevelNormalizationRoundActive;
+        xpControllerSnapshot.levelNormalizationRepeatPending =
+            xpLevelNormalizationRepeatPending;
         NotifyXpController(
             "Match Cycle snapshot saved",
             "Pause and restore this exact controller state.",
@@ -3297,6 +3573,13 @@ namespace PlayersTab {
         xpSoloResumePhase = xpControllerSnapshot.soloResumePhase;
         xpSoloResumeStage = xpControllerSnapshot.soloResumeStage;
         xpSoloResumeDeadlineIsMax = xpControllerSnapshot.soloResumeDeadlineIsMax;
+        xpLevelNormalizationPending = xpControllerSnapshot.levelNormalizationPending;
+        xpLevelNormalizationRoundStarted =
+            xpControllerSnapshot.levelNormalizationRoundStarted;
+        xpLevelNormalizationRoundActive =
+            xpControllerSnapshot.levelNormalizationRoundActive;
+        xpLevelNormalizationRepeatPending =
+            xpControllerSnapshot.levelNormalizationRepeatPending;
         for (const auto playerId : xpRoundGhostedImpostorIds) {
             const auto tracked = xpTrackedPlayers.find(playerId);
             if (tracked == xpTrackedPlayers.end()) continue;
@@ -3423,7 +3706,8 @@ namespace PlayersTab {
 
         const auto now = std::chrono::steady_clock::now();
         const int roundDurationSeconds =
-            xpControllerPhase == XpControllerPhase::FARMING_ROUND
+            xpLevelNormalizationRoundActive ? 0
+            : xpControllerPhase == XpControllerPhase::FARMING_ROUND
             ? xpFarmingDurationSeconds
             : xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP
             ? static_cast<int>(xpRolloverDuration.count())
@@ -3445,7 +3729,7 @@ namespace PlayersTab {
                 xpPostChatDeadline - now).count();
 
         WriteXpLevelRecorderLine(std::format(
-            "event=match_cycle_controller message={} running={} phase={} stage={} progress_mode={} in_lobby={} in_game={} in_meeting={} farming_duration_s={} drain_round_duration_s={} current_round_duration_s={} drain_between_round_s={} farming_lobby_grace_s={} drain_round={}/{} round_elapsed_ms={} round_deadline_remaining_ms={} post_chat_hold_remaining_ms={} pending_lobby_messages={} pending_ingame_messages={} shield_failure={} shield_failure_waived={} failure_detected_before_50_percent={} no_active_impostors={} stop_requested={} paused={} assigned_impostors={} context={}",
+            "event=match_cycle_controller message={} running={} phase={} stage={} progress_mode={} in_lobby={} in_game={} in_meeting={} farming_duration_s={} drain_round_duration_s={} current_round_duration_s={} drain_between_round_s={} farming_lobby_grace_s={} drain_round={}/{} round_elapsed_ms={} round_deadline_remaining_ms={} post_chat_hold_remaining_ms={} pending_lobby_messages={} pending_ingame_messages={} shield_failure={} shield_failure_waived={} failure_detected_before_50_percent={} no_active_impostors={} stop_requested={} paused={} assigned_impostors={} level_normalization_pending={} level_normalization_round_started={} level_normalization_round_active={} level_normalization_repeat_pending={} context={}",
             XpLevelRecorderQuote(message),
             IsXpControllerRunning(),
             XpControllerPhaseName(xpControllerPhase),
@@ -3464,6 +3748,8 @@ namespace PlayersTab {
             xpRoundFailureDetectedBeforeFiftyPercent,
             xpNoActiveFarmingImpostors, xpDrainStopRequested,
             xpControllerPaused, xpRoundImpostorIds.size(),
+            xpLevelNormalizationPending, xpLevelNormalizationRoundStarted,
+            xpLevelNormalizationRoundActive, xpLevelNormalizationRepeatPending,
             XpLevelRecorderContext()));
 
         for (const auto& [playerId, tracked] : xpTrackedPlayers) {
@@ -3480,7 +3766,7 @@ namespace PlayersTab {
                 != xpRoundImpostorIds.end();
             const bool stopVote = xpDrainStopVoterIds.contains(playerId);
             WriteXpLevelRecorderLine(std::format(
-                "event=match_cycle_player player_id={} name={} tracked_connected={} player_present={} raw_level={} displayed_level={} host={} assigned_impostor={} role_impostor={} shielded={} dead={} farming_complete={} farmed_this_round={} retry={} confirmation_response={} needs_rejoin={} lobby_base_level={} has_lobby_base_level={} round_baseline={} round_peak={} drain_eligible={} drain_plateaued={} level_patch_rejoin_required={} disconnected_during_farming={} disconnected_during_drain={} ghosted_before_50_percent={} protected_target_kills={} drain_stop_vote={} context={}",
+                "event=match_cycle_player player_id={} name={} tracked_connected={} player_present={} raw_level={} displayed_level={} host={} assigned_impostor={} role_impostor={} shielded={} dead={} farming_complete={} farmed_this_round={} retry={} confirmation_response={} needs_rejoin={} level_normalization_deferred={} lobby_base_level={} has_lobby_base_level={} normalization_pre_match_level_known={} round_baseline={} round_peak={} drain_eligible={} drain_plateaued={} level_patch_rejoin_required={} disconnected_during_farming={} disconnected_during_drain={} ghosted_before_50_percent={} protected_target_kills={} drain_stop_vote={} context={}",
                 static_cast<unsigned int>(playerId),
                 XpLevelRecorderQuote(tracked.name),
                 tracked.connected, currentPlayer != nullptr,
@@ -3492,8 +3778,10 @@ namespace PlayersTab {
                 xpFarmingRetryPlayerIds.contains(playerId),
                 confirmation == xpFarmingConfirmationResponses.end()
                     ? "none" : confirmation->second ? "DONE" : "RETRY",
-                tracked.needs_rejoin, tracked.lobby_base_level,
+                tracked.needs_rejoin, tracked.level_normalization_deferred,
+                tracked.lobby_base_level,
                 tracked.has_lobby_base_level,
+                tracked.level_normalization_pre_match_level_known,
                 baseline == xpRoundLevelBaselines.end() ? 0 : baseline->second,
                 peak == xpRoundLevelPeaks.end() ? 0 : peak->second,
                 tracked.drain_eligible, tracked.drain_plateaued,
@@ -4135,6 +4423,10 @@ namespace PlayersTab {
         xpControllerSnapshot.valid = false;
         xpHasFarmingRotationCursor = false;
         xpNoParticipantsLogged = false;
+        xpLevelNormalizationPending = true;
+        xpLevelNormalizationRoundStarted = false;
+        xpLevelNormalizationRoundActive = false;
+        xpLevelNormalizationRepeatPending = false;
         xpFarmingCycleAnnouncementPending = true;
         State.ForceEndAfterStartTriggered = false;
         for (auto player : GetConnectedXpPlayers()) {
@@ -4171,7 +4463,7 @@ namespace PlayersTab {
             "XP Controller",
             GetConnectedNonHostCount() == 0
                 ? "Waiting for players; solo lobby keep-alive is enabled."
-                : "Starting the farming rounds.",
+                : "Starting the level reset before farming.",
             ImVec4(0.f, 1.f, 0.5f, 1.f));
     }
 
@@ -4232,6 +4524,14 @@ namespace PlayersTab {
         const std::string rosterStatus = std::format(
             " | {} tracked / {} disconnected / {} needing rejoin",
             trackedCount, disconnectedCount, needingRejoinCount);
+        if (xpLevelNormalizationPending) {
+            const char* normalizationStatus = xpLevelNormalizationRoundActive
+                ? "Loading one-time level reset round"
+                : xpLevelNormalizationRoundStarted
+                ? "Waiting for levels to reset or participants to rejoin"
+                : "Preparing one-time level reset round";
+            return std::format("{}{}", normalizationStatus, rosterStatus);
+        }
         if (xpControllerStage == XpControllerStage::SoloLobbyKeepAlive) {
             return std::format(
                 "Waiting for participants - solo lobby keep-alive in {}s{}",
@@ -4362,7 +4662,13 @@ namespace PlayersTab {
             }
             break;
         case XpControllerStage::AwaitingMatch:
-            if (xpSoloKeepAliveRound && IsInGame()) {
+            if (xpLevelNormalizationRoundActive && IsInGame()
+                && now >= xpControllerDeadline) {
+                LogXpControllerEvent(
+                    "Shush-animation end trigger was not observed before the load deadline; using the loaded-game fallback to end the normalization match.");
+                ForceEndXpMatch();
+            }
+            else if (xpSoloKeepAliveRound && IsInGame()) {
                 xpControllerStage = XpControllerStage::MatchTimer;
                 xpRoundStartedAt = now;
                 xpControllerDeadline = now;
@@ -4424,7 +4730,10 @@ namespace PlayersTab {
             break;
         case XpControllerStage::AwaitingLobby:
             if (IsInLobby()) {
-                if (xpSoloKeepAliveRound) {
+                if (xpLevelNormalizationRoundActive) {
+                    HandleXpLevelNormalizationReturnedToLobby();
+                }
+                else if (xpSoloKeepAliveRound) {
                     ScheduleNextSoloKeepAlive(now);
                 }
                 else {
@@ -4499,20 +4808,20 @@ namespace PlayersTab {
                 if (xpProgressMode != XpProgressMode::LegacyChat) {
                     QueueXpControllerChat(
                         "Level draining starts. Rounds continue until level gains stop.",
-                        std::chrono::seconds::zero());
+                        xpDrainStartAnnouncementDelay);
                     LogXpControllerEvent(
                         "Level-based draining started with no fixed round limit.");
                 }
                 else if (xpDrainUntilStopMode) {
                     QueueXpControllerChat(
-                        "Draining starts in 30s. Type STOP only when you are done.",
-                        std::chrono::seconds::zero());
+                        "Auto-drain starting. Type STOP only when you are done.",
+                        xpDrainStartAnnouncementDelay);
                 }
                 else {
                     QueueXpControllerChat(std::format(
-                        "Auto-drain starts in 30s: {} rounds, {}s between; each ends after 35s.",
+                        "Auto-drain starting: {} rounds, {}s between; each ends after 35s.",
                         xpDrainRoundsTarget, xpDrainBetweenRoundRejoinSeconds),
-                        std::chrono::seconds::zero());
+                        xpDrainStartAnnouncementDelay);
                 }
                 if (xpProgressMode == XpProgressMode::LegacyChat) {
                     LogXpControllerEvent(std::format(
@@ -4569,6 +4878,14 @@ namespace PlayersTab {
         if (!IsXpControllerRunning() || !IsHost()
             || xpControllerStage != XpControllerStage::AwaitingMatch) return;
 
+        if (xpLevelNormalizationRoundActive) {
+            xpControllerDeadline = std::chrono::steady_clock::now()
+                + std::chrono::seconds(5);
+            LogXpControllerEvent(
+                "Normalization match loaded; waiting for the shush-animation end trigger.");
+            return;
+        }
+
         if (xpSoloKeepAliveRound) {
             xpControllerStage = XpControllerStage::MatchTimer;
             xpRoundStartedAt = std::chrono::steady_clock::now();
@@ -4607,6 +4924,18 @@ namespace PlayersTab {
             "Game loading completed; starting {}ms round timer ({}s base + {}ms chat wait). {}",
             roundDuration.count(), matchDurationSeconds, messageWait.count(),
             BuildXpControllerDiagnostics()));
+    }
+
+    void OnXpControllerShushAnimation() {
+        if (!IsXpControllerRunning() || !IsHost()
+            || !xpLevelNormalizationRoundActive
+            || xpControllerStage != XpControllerStage::AwaitingMatch
+            || !IsInGame()) return;
+
+        LogXpControllerEvent(std::format(
+            "Shush animation reached; ending the one-time level normalization match. {}",
+            BuildXpControllerDiagnostics()));
+        ForceEndXpMatch();
     }
 
     enum Groups {
