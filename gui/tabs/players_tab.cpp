@@ -21,6 +21,7 @@
 #include <limits>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <ctime>
 #include <utility>
 #include "_rpc.h"
@@ -184,8 +185,13 @@ namespace PlayersTab {
     static std::unordered_map<Game::PlayerId, int> xpRoundProtectedKillCounts;
     static std::unordered_map<Game::PlayerId, bool> xpPreFarmingMoveableState;
     static std::unordered_map<Game::PlayerId, Game::PlayerId> xpFarmingTargetAssignments;
-    static std::vector<Vector2> xpFarmingAnchors;
-    static bool xpFarmingDoorsPrepared = false;
+    static std::unordered_map<Game::PlayerId, int> xpFarmingVentAssignments;
+    static std::vector<int> xpFarmingVentIds;
+    static std::unordered_map<SystemTypes__Enum, bool> xpPreFarmingDoorOpenState;
+    static std::vector<SystemTypes__Enum> xpPreFarmingPinnedDoors;
+    static bool xpPreFarmingDisableSabotages = false;
+    static bool xpPreFarmingDisableMeetings = false;
+    static bool xpFarmingControlsPrepared = false;
     static std::unordered_set<Game::PlayerId> xpRoundGhostedImpostorIds;
     static bool xpFarmingSafetyWarningsPending = false;
     static size_t xpPendingGhostRoleQueueTicks = 0;
@@ -1878,21 +1884,6 @@ namespace PlayersTab {
             && xpControllerStage == XpControllerStage::MatchTimer;
     }
 
-    static std::optional<Vector2> GetXpFarmingRoomAnchor(SystemTypes__Enum roomId) {
-        if (Game::pShipStatus == nullptr || *Game::pShipStatus == nullptr) return std::nullopt;
-        for (auto room : il2cpp::Array((*Game::pShipStatus)->fields._AllRooms_k__BackingField)) {
-            if (room == nullptr || room->fields.RoomId != roomId || room->fields.roomArea == nullptr) continue;
-            auto transform = app::Component_get_transform(
-                reinterpret_cast<Component_1*>(room->fields.roomArea), nullptr);
-            if (transform == nullptr) continue;
-            auto position = app::Transform_get_position(transform, nullptr);
-            Vector2 anchor{ position.x, position.y };
-            if (app::Collider2D_OverlapPoint(room->fields.roomArea, anchor, nullptr))
-                return anchor;
-        }
-        return std::nullopt;
-    }
-
     static void EjectXpPlayersFromVents() {
         if (Game::pShipStatus == nullptr || *Game::pShipStatus == nullptr) return;
         for (auto player : GetConnectedXpPlayers()) {
@@ -1925,9 +1916,30 @@ namespace PlayersTab {
     }
 
     void PrepareXpFarmingRound() {
-        if (!IsXpFarmingRound() || xpFarmingDoorsPrepared) return;
+        if (!IsXpFarmingRound() || xpFarmingControlsPrepared) return;
+        xpFarmingControlsPrepared = true;
+        xpPreFarmingDisableSabotages = State.DisableSabotages;
+        xpPreFarmingDisableMeetings = State.DisableMeetings;
+        State.DisableSabotages = true;
+        State.DisableMeetings = true;
+        xpPreFarmingPinnedDoors = State.pinnedDoors;
+        xpPreFarmingDoorOpenState.clear();
+        if (Game::pShipStatus != nullptr && *Game::pShipStatus != nullptr) {
+            for (auto door : il2cpp::Array((*Game::pShipStatus)->fields.AllDoors)) {
+                if (door == nullptr) continue;
+                bool open = true;
+                const std::string_view typeName = door->klass == nullptr
+                    ? std::string_view{} : door->klass->name;
+                if (typeName == "PlainDoor" || typeName == "AutoOpenDoor")
+                    open = reinterpret_cast<PlainDoor*>(door)->fields.Open;
+                else if (typeName == "MushroomWallDoor")
+                    open = reinterpret_cast<MushroomWallDoor*>(door)->fields.open;
+                auto [it, inserted] = xpPreFarmingDoorOpenState.emplace(
+                    door->fields.Room, open);
+                if (!inserted) it->second = it->second && open;
+            }
+        }
         EjectXpPlayersFromVents();
-        xpFarmingAnchors.clear();
         static constexpr SystemTypes__Enum preferredRooms[] = {
             SystemTypes__Enum::Admin,
             SystemTypes__Enum::LowerEngine,
@@ -1939,64 +1951,59 @@ namespace PlayersTab {
             SystemTypes__Enum::MedBay,
             SystemTypes__Enum::Cafeteria,
         };
-        for (const auto roomId : preferredRooms) {
-            auto anchor = GetXpFarmingRoomAnchor(roomId);
-            if (!anchor.has_value()) continue;
-            if (std::none_of(xpFarmingAnchors.begin(), xpFarmingAnchors.end(),
-                [&](const Vector2& other) {
-                    return app::Vector2_Distance(*anchor, other, nullptr) < 1.f;
-                })) {
-                xpFarmingAnchors.push_back(*anchor);
-            }
-        }
+        std::unordered_map<SystemTypes__Enum, int> ventByRoom;
         if (Game::pShipStatus != nullptr && *Game::pShipStatus != nullptr) {
-            for (auto room : il2cpp::Array(
-                (*Game::pShipStatus)->fields._AllRooms_k__BackingField)) {
-                if (room == nullptr || room->fields.roomArea == nullptr
-                    || room->fields.RoomId == SystemTypes__Enum::Hallway
-                    || room->fields.RoomId == SystemTypes__Enum::Outside
-                    || room->fields.RoomId == SystemTypes__Enum::Decontamination
-                    || room->fields.RoomId == SystemTypes__Enum::Decontamination2
-                    || room->fields.RoomId == SystemTypes__Enum::Decontamination3)
-                    continue;
+            for (auto vent : il2cpp::Array((*Game::pShipStatus)->fields._AllVents_k__BackingField)) {
+                if (vent == nullptr) continue;
                 auto transform = app::Component_get_transform(
-                    reinterpret_cast<Component_1*>(room->fields.roomArea), nullptr);
+                    reinterpret_cast<Component_1*>(vent), nullptr);
                 if (transform == nullptr) continue;
                 const auto position = app::Transform_get_position(transform, nullptr);
-                const Vector2 anchor{ position.x, position.y };
-                if (!app::Collider2D_OverlapPoint(room->fields.roomArea, anchor, nullptr))
+                const auto room = GetSystemTypes({ position.x, position.y });
+                if (room == SystemTypes__Enum::Hallway
+                    || room == SystemTypes__Enum::Outside
+                    || room == SystemTypes__Enum::Decontamination
+                    || room == SystemTypes__Enum::Decontamination2
+                    || room == SystemTypes__Enum::Decontamination3)
                     continue;
-                if (std::none_of(xpFarmingAnchors.begin(), xpFarmingAnchors.end(),
-                    [&](const Vector2& other) {
-                        return app::Vector2_Distance(anchor, other, nullptr) < 1.f;
-                    })) {
-                    xpFarmingAnchors.push_back(anchor);
-                }
+                ventByRoom.try_emplace(room, vent->fields.Id);
             }
         }
-        for (const auto roomId : State.mapDoors) {
-            State.rpcQueue.push(new RpcCloseDoorsOfType(roomId, false));
+        xpFarmingVentIds.clear();
+        std::unordered_set<SystemTypes__Enum> assignedRooms;
+        for (const auto room : preferredRooms) {
+            const auto vent = ventByRoom.find(room);
+            if (vent != ventByRoom.end() && assignedRooms.insert(room).second)
+                xpFarmingVentIds.push_back(vent->second);
         }
-        xpFarmingDoorsPrepared = true;
+        std::vector<std::pair<SystemTypes__Enum, int>> remainingRoomVents(
+            ventByRoom.begin(), ventByRoom.end());
+        std::sort(remainingRoomVents.begin(), remainingRoomVents.end(),
+            [](const auto& left, const auto& right) {
+                return static_cast<uint8_t>(left.first) < static_cast<uint8_t>(right.first);
+            });
+        for (const auto& [room, ventId] : remainingRoomVents) {
+            if (assignedRooms.insert(room).second) xpFarmingVentIds.push_back(ventId);
+        }
+        for (const auto roomId : State.mapDoors) {
+            const bool wasPinned = std::find(
+                xpPreFarmingPinnedDoors.begin(), xpPreFarmingPinnedDoors.end(), roomId)
+                != xpPreFarmingPinnedDoors.end();
+            State.rpcQueue.push(new RpcCloseDoorsOfType(roomId, !wasPinned));
+        }
         LogXpControllerEvent(std::format(
-            "Prepared farming map controls: availableRoomAnchors={}, doorsClosed={}, ventsEjected.",
-            xpFarmingAnchors.size(), State.mapDoors.size()));
-        if (xpFarmingAnchors.empty()) {
+            "Prepared farming controls with Sicko's built-in teleport-to-vent path: distinctRoomVents={}, doorsPinned={}, sabotageDisabled={}, meetingsDisabled={}.",
+            xpFarmingVentIds.size(), State.mapDoors.size(), State.DisableSabotages,
+            State.DisableMeetings));
+        if (xpFarmingVentIds.empty()) {
             LogXpControllerEvent(
-                "No supported room anchors were found on this map; farming restrictions remain active, but player placement is skipped.");
+                "No usable vent destinations were found on this map; farming restrictions remain active, but placement is skipped.");
         }
         ReconcileXpFarmingPositions();
     }
 
     static void ReconcileXpFarmingPositions() {
-        if (!IsXpFarmingRound() || xpFarmingAnchors.empty()) return;
-        std::vector<PlayerControl*> impostors;
-        for (const auto playerId : xpRoundImpostorIds) {
-            auto player = GetPlayerControlById(playerId);
-            auto data = player == nullptr ? nullptr : GetPlayerData(player);
-            if (player != nullptr && data != nullptr && !data->fields.IsDead)
-                impostors.push_back(player);
-        }
+        if (!IsXpFarmingRound() || xpFarmingVentIds.empty()) return;
         std::vector<PlayerControl*> protectedPlayers;
         for (const auto& [playerId, tracked] : xpTrackedPlayers) {
             if (!tracked.is_shielded) continue;
@@ -2011,16 +2018,22 @@ namespace PlayersTab {
             });
 
         std::unordered_set<Game::PlayerId> assignedTargets;
-        for (size_t i = 0; i < impostors.size(); ++i) {
-            if (i >= xpFarmingAnchors.size()) {
+        for (const auto impostorId : xpRoundImpostorIds) {
+            auto impostor = GetPlayerControlById(impostorId);
+            auto impostorData = impostor == nullptr ? nullptr : GetPlayerData(impostor);
+            if (impostor == nullptr || impostorData == nullptr || impostorData->fields.IsDead)
+                continue;
+            const auto assignmentIndex = static_cast<size_t>(std::distance(
+                xpRoundImpostorIds.begin(),
+                std::find(xpRoundImpostorIds.begin(), xpRoundImpostorIds.end(), impostorId)));
+            if (assignmentIndex >= xpFarmingVentIds.size()) {
                 LogXpControllerEvent(std::format(
-                    "Map has only {} distinct farming rooms for {} active Impostors; remaining pairs are left in place rather than sharing a farming room.",
-                    xpFarmingAnchors.size(), impostors.size()));
+                    "Map has only {} distinct vent destinations for {} assigned Impostors; extra pairs are left in place rather than sharing a destination.",
+                    xpFarmingVentIds.size(), xpRoundImpostorIds.size()));
                 break;
             }
-            auto impostor = impostors[i];
             PlayerControl* target = nullptr;
-            const auto previous = xpFarmingTargetAssignments.find(impostor->fields.PlayerId);
+            const auto previous = xpFarmingTargetAssignments.find(impostorId);
             if (previous != xpFarmingTargetAssignments.end()
                 && !assignedTargets.contains(previous->second)) {
                 auto oldTarget = GetPlayerControlById(previous->second);
@@ -2045,26 +2058,23 @@ namespace PlayersTab {
             const bool targetChanged = previous == xpFarmingTargetAssignments.end()
                 || previous->second != target->fields.PlayerId;
             assignedTargets.insert(target->fields.PlayerId);
-            xpFarmingTargetAssignments[impostor->fields.PlayerId] = target->fields.PlayerId;
-            const auto anchor = xpFarmingAnchors[i];
-            const Vector2 impostorPosition{ anchor.x - 0.65f, anchor.y };
-            const auto currentImpostorPosition = PlayerControl_GetTruePosition(impostor, nullptr);
-            const bool impostorNeedsSnap =
-                app::Vector2_Distance(currentImpostorPosition, impostorPosition, nullptr) > 2.5f;
-            if (impostorNeedsSnap)
-                State.rpcQueue.push(new RpcForceSnapTo(impostor, impostorPosition));
-            const Vector2 targetPosition = targetChanged && !impostorNeedsSnap
-                ? Vector2{ currentImpostorPosition.x + 0.65f, currentImpostorPosition.y }
-                : Vector2{ anchor.x + 0.65f, anchor.y };
+            xpFarmingTargetAssignments[impostorId] = target->fields.PlayerId;
+            const auto ventAssignment = xpFarmingVentAssignments.find(impostorId);
+            const bool newVentAssignment = ventAssignment == xpFarmingVentAssignments.end();
+            if (newVentAssignment)
+                xpFarmingVentAssignments[impostorId] = xpFarmingVentIds[assignmentIndex];
+            const int ventId = xpFarmingVentAssignments.at(impostorId);
 
             if (!xpPreFarmingMoveableState.contains(target->fields.PlayerId))
                 xpPreFarmingMoveableState[target->fields.PlayerId] = target->fields.moveable;
             target->fields.moveable = false;
 
-            const auto currentTargetPosition = PlayerControl_GetTruePosition(target, nullptr);
-            if (targetChanged
-                || app::Vector2_Distance(currentTargetPosition, targetPosition, nullptr) > 0.8f) {
-                State.rpcQueue.push(new RpcForceSnapTo(target, targetPosition));
+            if (newVentAssignment || targetChanged) {
+                State.rpcQueue.push(new RpcBootFromVent(impostor, ventId));
+                State.rpcQueue.push(new RpcBootFromVent(target, ventId));
+                LogXpControllerEvent(std::format(
+                    "Used built-in Teleport to Vent for farming pair: impostorId={}, targetId={}, ventId={}.",
+                    impostorId, target->fields.PlayerId, ventId));
             }
         }
 
@@ -2084,27 +2094,42 @@ namespace PlayersTab {
             EndXpFarmingRound();
             return;
         }
-        if (!xpFarmingDoorsPrepared) PrepareXpFarmingRound();
-        else ReconcileXpFarmingPositions();
+        if (!xpFarmingControlsPrepared) PrepareXpFarmingRound();
+        else {
+            State.DisableSabotages = true;
+            State.DisableMeetings = true;
+            ReconcileXpFarmingPositions();
+        }
     }
 
     void EndXpFarmingRound() {
-        const bool hadFarmingSetup = xpFarmingDoorsPrepared
+        const bool hadFarmingSetup = xpFarmingControlsPrepared
             || !xpPreFarmingMoveableState.empty()
             || !xpFarmingTargetAssignments.empty();
         if (!hadFarmingSetup) return;
-        if (IsInGame() && Game::pShipStatus != nullptr && *Game::pShipStatus != nullptr) {
-            for (const auto roomId : State.mapDoors)
-                State.rpcQueue.push(new RpcOpenDoorsOfType(roomId));
-        }
         for (const auto& [playerId, moveable] : xpPreFarmingMoveableState) {
             auto player = GetPlayerControlById(playerId);
             if (player != nullptr) player->fields.moveable = moveable;
         }
+        State.pinnedDoors = xpPreFarmingPinnedDoors;
+        if (IsInGame() && Game::pShipStatus != nullptr && *Game::pShipStatus != nullptr) {
+            for (const auto& [roomId, wasOpen] : xpPreFarmingDoorOpenState) {
+                if (std::find(xpPreFarmingPinnedDoors.begin(), xpPreFarmingPinnedDoors.end(), roomId)
+                    != xpPreFarmingPinnedDoors.end())
+                    continue;
+                if (wasOpen) State.rpcQueue.push(new RpcOpenDoorsOfType(roomId));
+                else State.rpcQueue.push(new RpcCloseDoorsOfType(roomId, false));
+            }
+        }
+        State.DisableSabotages = xpPreFarmingDisableSabotages;
+        State.DisableMeetings = xpPreFarmingDisableMeetings;
         xpPreFarmingMoveableState.clear();
+        xpPreFarmingDoorOpenState.clear();
+        xpPreFarmingPinnedDoors.clear();
         xpFarmingTargetAssignments.clear();
-        xpFarmingAnchors.clear();
-        xpFarmingDoorsPrepared = false;
+        xpFarmingVentAssignments.clear();
+        xpFarmingVentIds.clear();
+        xpFarmingControlsPrepared = false;
     }
 
     void OnXpControllerChatSent() {

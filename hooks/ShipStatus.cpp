@@ -8,7 +8,6 @@
 #include "replay.hpp"
 #include "profiler.h"
 #include "game.h"
-#include "../gui/tabs/players_tab.h"
 
 float dShipStatus_CalculateLightRadius(ShipStatus* __this, NetworkedPlayerInfo* player, MethodInfo* method) {
     if (State.ShowHookLogs) Log.HookDebug("Hook dShipStatus_CalculateLightRadius executed", false);
@@ -114,7 +113,7 @@ static bool IsSabotageTriggerAmount(SystemTypes__Enum systemType, int32_t amount
 void dShipStatus_RpcUpdateSystem(ShipStatus* __this, SystemTypes__Enum systemType, int32_t amount, MethodInfo* method) {
     if (State.ShowHookLogs) Log.HookDebug("Hook dShipStatus_RpcUpdateSystem executed", false);
 
-    if (PlayersTab::IsXpFarmingRound()
+    if (!State.PanicMode && IsHost() && State.DisableSabotages
         && systemType != SystemTypes__Enum::Doors
         && IsSabotageTriggerAmount(systemType, amount))
         return;
@@ -158,7 +157,7 @@ void dShipStatus_HandleRpc(ShipStatus* __this, uint8_t callId, MessageReader* re
         systemType == SystemTypes__Enum::Decontamination3 ||
         (callId == 35 && systemType == SystemTypes__Enum::MedBay))
         return ShipStatus_HandleRpc(__this, callId, reader, method);
-    if (PlayersTab::IsXpFarmingRound()
+    if (!State.PanicMode && IsHost() && State.DisableSabotages
         && callId == (uint8_t)RpcCalls__Enum::UpdateSystem
         && IsSabotageTriggerAmount(systemType, systemAmount))
         return;
@@ -229,10 +228,6 @@ void dShipStatus_UpdateSystem(ShipStatus* __this, SystemTypes__Enum systemType, 
         systemType == SystemTypes__Enum::Decontamination3 ||
         systemType == SystemTypes__Enum::MedBay)
         return ShipStatus_UpdateSystem(__this, systemType, player, amount, method);
-    if (PlayersTab::IsXpFarmingRound()
-        && systemType != SystemTypes__Enum::Doors
-        && IsSabotageTriggerAmount(systemType, amount))
-        return;
     if (!State.PanicMode && State.DisableSabotages && IsHost()) return;
 
     if (!State.PanicMode && IsHost() && IsSabotageTriggerAmount(systemType, amount)) {
