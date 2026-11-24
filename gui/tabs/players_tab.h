@@ -79,6 +79,7 @@ namespace PlayersTab {
 	void ClearShieldBreakCounts();
 	void OnXpControllerPlayerLeft(Game::PlayerId playerId);
 	bool IsXpFarmingRound();
+	bool ConsumeXpFarmingVentEntryPermit(Game::PlayerId playerId);
 	void TickXpFarmingRound();
 	void PrepareXpFarmingRound();
 	void EndXpFarmingRound();
