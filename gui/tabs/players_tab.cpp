@@ -294,6 +294,7 @@ namespace PlayersTab {
     static void SetShieldState(Game::PlayerId playerId, bool enabled);
     static void RestoreMatchCycleProtectionSettings();
     static void RecordXpLevelSnapshot(const std::string& reason);
+    static void RecordXpControllerDiagnosticEvent(const std::string& message);
     static void ReconcileXpFarmingPositions();
     static uint32_t GetXpObservedLevel(Game::PlayerId playerId);
     static void SampleXpRoundLevels();
@@ -356,6 +357,7 @@ namespace PlayersTab {
 
     static void LogXpControllerEvent(const std::string& message) {
         Log.Info("MATCH CYCLE", message);
+        RecordXpControllerDiagnosticEvent(message);
     }
 
     static void NotifyXpController(const std::string& title, const std::string& message, ImVec4 color) {
@@ -3416,6 +3418,94 @@ namespace PlayersTab {
             data->fields.IsDead);
     }
 
+    static void RecordXpControllerDiagnosticEvent(const std::string& message) {
+        if (!xpLevelRecorderRunning) return;
+
+        const auto now = std::chrono::steady_clock::now();
+        const int roundDurationSeconds =
+            xpControllerPhase == XpControllerPhase::FARMING_ROUND
+            ? xpFarmingDurationSeconds
+            : xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP
+            ? static_cast<int>(xpRolloverDuration.count())
+            : 0;
+        const int64_t roundElapsedMs =
+            xpRoundStartedAt == std::chrono::steady_clock::time_point{}
+            ? -1
+            : std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - xpRoundStartedAt).count();
+        const int64_t deadlineRemainingMs =
+            xpControllerDeadline == (std::chrono::steady_clock::time_point::max)()
+            ? -1
+            : std::chrono::duration_cast<std::chrono::milliseconds>(
+                xpControllerDeadline - now).count();
+        const int64_t postChatHoldRemainingMs =
+            xpPostChatDeadline == std::chrono::steady_clock::time_point{}
+            ? -1
+            : std::chrono::duration_cast<std::chrono::milliseconds>(
+                xpPostChatDeadline - now).count();
+
+        WriteXpLevelRecorderLine(std::format(
+            "event=match_cycle_controller message={} running={} phase={} stage={} progress_mode={} in_lobby={} in_game={} in_meeting={} farming_duration_s={} drain_round_duration_s={} current_round_duration_s={} drain_between_round_s={} farming_lobby_grace_s={} drain_round={}/{} round_elapsed_ms={} round_deadline_remaining_ms={} post_chat_hold_remaining_ms={} pending_lobby_messages={} pending_ingame_messages={} shield_failure={} shield_failure_waived={} failure_detected_before_50_percent={} no_active_impostors={} stop_requested={} paused={} assigned_impostors={} context={}",
+            XpLevelRecorderQuote(message),
+            IsXpControllerRunning(),
+            XpControllerPhaseName(xpControllerPhase),
+            XpControllerStageName(xpControllerStage),
+            static_cast<int>(xpProgressMode),
+            IsInLobby(), IsInGame(), State.InMeeting,
+            xpFarmingDurationSeconds,
+            xpRolloverDuration.count(),
+            roundDurationSeconds,
+            xpDrainBetweenRoundRejoinSeconds,
+            xpFarmingLobbyGraceDuration.count(),
+            xpDrainRoundsCompleted + 1, xpDrainRoundsTarget,
+            roundElapsedMs, deadlineRemainingMs, postChatHoldRemainingMs,
+            xpPendingChatMessages.size(), xpPendingInGameChatMessages.size(),
+            xpRoundShieldFailure, xpRoundShieldFailureWaived,
+            xpRoundFailureDetectedBeforeFiftyPercent,
+            xpNoActiveFarmingImpostors, xpDrainStopRequested,
+            xpControllerPaused, xpRoundImpostorIds.size(),
+            XpLevelRecorderContext()));
+
+        for (const auto& [playerId, tracked] : xpTrackedPlayers) {
+            auto* const currentPlayer = GetPlayerControlById(playerId);
+            auto* const currentData = currentPlayer == nullptr
+                ? nullptr : GetPlayerData(currentPlayer);
+            const auto baseline = xpRoundLevelBaselines.find(playerId);
+            const auto peak = xpRoundLevelPeaks.find(playerId);
+            const auto killCount = xpRoundProtectedKillCounts.find(playerId);
+            const auto confirmation = xpFarmingConfirmationResponses.find(playerId);
+            const uint32_t currentLevel = GetXpObservedLevel(playerId);
+            const bool assignedImpostor = std::find(
+                xpRoundImpostorIds.begin(), xpRoundImpostorIds.end(), playerId)
+                != xpRoundImpostorIds.end();
+            const bool stopVote = xpDrainStopVoterIds.contains(playerId);
+            WriteXpLevelRecorderLine(std::format(
+                "event=match_cycle_player player_id={} name={} tracked_connected={} player_present={} raw_level={} displayed_level={} host={} assigned_impostor={} role_impostor={} shielded={} dead={} farming_complete={} farmed_this_round={} retry={} confirmation_response={} needs_rejoin={} lobby_base_level={} has_lobby_base_level={} round_baseline={} round_peak={} drain_eligible={} drain_plateaued={} level_patch_rejoin_required={} disconnected_during_farming={} disconnected_during_drain={} ghosted_before_50_percent={} protected_target_kills={} drain_stop_vote={} context={}",
+                static_cast<unsigned int>(playerId),
+                XpLevelRecorderQuote(tracked.name),
+                tracked.connected, currentPlayer != nullptr,
+                currentLevel == 0 ? 0 : currentLevel - 1,
+                currentLevel, tracked.is_host, assignedImpostor,
+                tracked.is_impostor, tracked.is_shielded,
+                currentData != nullptr && currentData->fields.IsDead,
+                tracked.has_completed_objective, tracked.farmed_this_round,
+                xpFarmingRetryPlayerIds.contains(playerId),
+                confirmation == xpFarmingConfirmationResponses.end()
+                    ? "none" : confirmation->second ? "DONE" : "RETRY",
+                tracked.needs_rejoin, tracked.lobby_base_level,
+                tracked.has_lobby_base_level,
+                baseline == xpRoundLevelBaselines.end() ? 0 : baseline->second,
+                peak == xpRoundLevelPeaks.end() ? 0 : peak->second,
+                tracked.drain_eligible, tracked.drain_plateaued,
+                tracked.level_patch_rejoin_required,
+                tracked.disconnected_during_farming_round,
+                tracked.disconnected_during_drain_round,
+                xpRoundGhostedBeforeFiftyPercentIds.contains(playerId),
+                killCount == xpRoundProtectedKillCounts.end() ? 0 : killCount->second,
+                stopVote, XpLevelRecorderContext()));
+        }
+    }
+
     static void RecordXpLevelSnapshot(const std::string& reason) {
         if (!xpLevelRecorderRunning || (!IsInLobby() && !IsInGame())) return;
         for (auto player : GetConnectedXpPlayers()) {
@@ -3513,10 +3603,11 @@ namespace PlayersTab {
         }
         output << "SickoMenu Level Diagnostic Trace\n"
             << "File: " << xpLevelRecorderOutputPath.string() << '\n'
-            << "Purpose: passive level and lifecycle diagnostics; independent of Match Cycle.\n"
+            << "Purpose: level, lifecycle, and Match Cycle diagnostics for investigating farming/drain decisions.\n"
             << "Level values: raw_level is stored 0-based; displayed_level is raw_level + 1.\n"
             << "Sampling: connected player levels are checked every 250 ms; only changes are emitted between snapshots.\n"
-            << "Events: SetLevel calls, queued RpcSetLevel requests, saved profile-level overrides, sampled changes, phase changes, joins, leaves, and game lifecycle.\n"
+            << "Events: SetLevel calls, queued RpcSetLevel requests, saved profile-level overrides, sampled changes, phase changes, joins/leaves, game lifecycle, and every Match Cycle controller event.\n"
+            << "Match Cycle events include controller phase/stage, timers, failure flags, round assignments, and each tracked player's current level, baseline/peak, role, shield, completion, retry, drain, patch, disconnect, and kill state.\n"
             << "SetLevel hook events include before/requested/forwarded/after values; a caller is not exposed by that game method hook.\n"
             << "Identity: player ID and current display name only; no Friend Code or PUID is recorded.\n\n";
         output.flush();
