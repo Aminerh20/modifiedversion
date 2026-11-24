@@ -157,8 +157,9 @@ public:
 
 class RpcReportBody : public RPCInterface {
 	PlayerSelection reportedPlayer;
+	bool bypassMeetingDisable;
 public:
-	RpcReportBody(const PlayerSelection& target);
+	RpcReportBody(const PlayerSelection& target, bool bypassMeetingDisable = false);
 	virtual void Process() override;
 };
 

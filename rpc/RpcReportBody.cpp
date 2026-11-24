@@ -4,16 +4,21 @@
 #include "state.hpp"
 #include "utility.h"
 
-RpcReportBody::RpcReportBody(const PlayerSelection& target)
+RpcReportBody::RpcReportBody(const PlayerSelection& target, bool bypassMeetingDisable)
 {
 	this->reportedPlayer = target;
+	this->bypassMeetingDisable = bypassMeetingDisable;
 }
 
 void RpcReportBody::Process()
 {
 	if (Object_1_IsNull((Object_1*)*Game::pShipStatus)) return;
-	if (IsHost() && !State.PanicMode && (State.DisableMeetings || (State.BattleRoyale || State.TaskSpeedrun))) return;
+	if (IsHost() && !State.PanicMode
+		&& ((State.DisableMeetings && !bypassMeetingDisable) || (State.BattleRoyale || State.TaskSpeedrun))) return;
+	const bool meetingsWereDisabled = State.DisableMeetings;
+	if (bypassMeetingDisable) State.DisableMeetings = false;
 	PlayerControl_CmdReportDeadBody(*Game::pLocalPlayer, reportedPlayer.get_PlayerData().value_or(nullptr), nullptr);
+	State.DisableMeetings = meetingsWereDisabled;
 }
 
 RpcForceReportBody::RpcForceReportBody(PlayerControl* Player, const PlayerSelection& target)

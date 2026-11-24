@@ -85,6 +85,7 @@ namespace PlayersTab {
         bool connected = false;
         bool disconnected_after_rejoin_request = false;
         bool disconnected_during_farming_round = false;
+        bool disconnected_during_drain_round = false;
         bool was_impostor_this_round = false;
         bool farmed_this_round = false;
         bool demoted_to_ghost_this_round = false;
@@ -510,10 +511,7 @@ namespace PlayersTab {
         if (xpDrainMeetingAnnouncementPending && IsInGame() && State.InMeeting
             && State.ChatCooldown >= 3.f && CanSendXpControllerChat()) {
             const std::string meetingText =
-                xpProgressMode == XpProgressMode::LegacyChat
-                ? std::format("Draining round {}.", xpDrainRoundsCompleted + 1)
-                : std::format("Drain round {}. Meeting stays open while levels are tracked.",
-                    xpDrainRoundsCompleted + 1);
+                std::format("Drain round {}.", xpDrainRoundsCompleted + 1);
             State.rpcQueue.push(new RpcSendChat(*Game::pLocalPlayer, meetingText));
             State.MessageSent = true;
             xpDrainMeetingAnnouncementPending = false;
@@ -1693,10 +1691,13 @@ namespace PlayersTab {
         size_t progressingCount = 0;
         size_t plateauCount = 0;
         size_t unknownCount = 0;
+        std::vector<std::string> leveledPlayers;
         for (const auto& [playerId, tracked] : xpTrackedPlayers) {
             if (tracked.is_host || !tracked.drain_eligible || tracked.drain_plateaued) continue;
             const auto baseline = xpRoundLevelBaselines.find(playerId);
-            if (!tracked.connected || baseline == xpRoundLevelBaselines.end()) {
+            if (!tracked.connected
+                || tracked.disconnected_during_drain_round
+                || baseline == xpRoundLevelBaselines.end()) {
                 ++unknownCount;
                 continue;
             }
@@ -1727,6 +1728,9 @@ namespace PlayersTab {
             }
             else if (highestObservedLevel > baseline->second) {
                 ++progressingCount;
+                if (highestObservedLevel == baseline->second + 1) {
+                    leveledPlayers.push_back(XpControllerChatName(tracked.name));
+                }
             }
             else {
                 auto& mutableTracked = xpTrackedPlayers[playerId];
@@ -1750,6 +1754,14 @@ namespace PlayersTab {
                 [](const auto& entry) {
                     return !entry.second.is_host && entry.second.drain_plateaued;
                 })));
+        if (!leveledPlayers.empty()) {
+            std::string message = "+1 level: ";
+            for (size_t index = 0; index < leveledPlayers.size(); ++index) {
+                if (index > 0) message += ", ";
+                message += leveledPlayers[index];
+            }
+            QueueXpControllerChat(message + ".");
+        }
         return progressingCount > 0 || unknownCount > 0;
     }
 
@@ -1893,6 +1905,15 @@ namespace PlayersTab {
             "Player disconnected; cycle continues without pausing: playerId={}, name='{}', phase={}, stage={}.",
             playerId, tracked->second.name, XpControllerPhaseName(xpControllerPhase),
             XpControllerStageName(xpControllerStage)));
+        if (xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP
+            && (xpControllerStage == XpControllerStage::MatchTimer
+                || xpControllerStage == XpControllerStage::AwaitingLobby
+                || xpControllerStage == XpControllerStage::LobbyDelay)) {
+            tracked->second.disconnected_during_drain_round = true;
+            LogXpControllerEvent(std::format(
+                "Drain level sample marked unknown because participant disconnected during the round/lobby sample window: playerId={}, name='{}'.",
+                playerId, tracked->second.name));
+        }
         if (xpControllerPhase != XpControllerPhase::FARMING_ROUND
             || std::find(
                 xpRoundImpostorIds.begin(), xpRoundImpostorIds.end(), playerId)
@@ -2374,6 +2395,9 @@ namespace PlayersTab {
         xpRoundShieldFailureWaived = false;
         xpNoActiveFarmingImpostors = false;
         xpRoundStartedAt = {};
+        for (auto& [playerId, tracked] : xpTrackedPlayers) {
+            tracked.disconnected_during_drain_round = false;
+        }
         if (xpProgressMode != XpProgressMode::LegacyChat) {
             CaptureXpRoundLevelBaselines(false);
         }
@@ -2571,9 +2595,9 @@ namespace PlayersTab {
                 : std::format("Player {}", playerId);
             if (resultSummary != "FARMING RESULT: ") resultSummary += ", ";
             const std::string result = xpRoundGhostedBeforeFiftyPercentIds.contains(playerId)
-                ? "RETRY (ghosted before 50%)"
+                ? "RETRY"
                 : (!participantAvailable
-                    ? "RETRY (disconnected)"
+                    ? "RETRY"
                 : (response == xpFarmingConfirmationResponses.end()
                     ? "DONE (no reply)"
                     : (completed ? "DONE" : "RETRY")));
@@ -2748,12 +2772,13 @@ namespace PlayersTab {
                     tracked->second.has_earned_xp = false;
                     tracked->second.has_completed_objective = false;
                     tracked->second.farmed_this_round = false;
+                    QueueXpControllerChat(std::format(
+                        "{}: RETRY.",
+                        XpControllerChatName(tracked->second.name)));
                 }
                 xpControllerStage = XpControllerStage::LobbyDelay;
                 xpControllerDeadline = std::chrono::steady_clock::now()
                     + xpFarmingLobbyGraceDuration;
-                QueueXpControllerChat(
-                    "Farming round failed before 50%; assigned Impostors remain incomplete and will be retried.");
                 LogXpControllerEvent(std::format(
                     "Farming round failed before 50%; cleared completion for all {} assigned Impostor(s), including ghosted players. {}",
                     xpRoundImpostorIds.size(), BuildXpControllerDiagnostics()));
@@ -3009,9 +3034,6 @@ namespace PlayersTab {
                     "Drain levels stopped increasing during the lobby sampling interval; requesting rejoin after the transition grace.");
                 return;
             }
-            QueueXpControllerChat(std::format(
-                "Drain round {} complete. Levels increased.",
-                xpDrainRoundsCompleted));
             LogXpControllerEvent(std::format(
                 "Drain round {} retained level progress through the lobby sampling interval; starting the next round.",
                 xpDrainRoundsCompleted));
@@ -3888,7 +3910,6 @@ namespace PlayersTab {
     bool ShouldHoldXpDrainMeeting() {
         return IsXpControllerRunning()
             && IsHost()
-            && xpDrainUntilStopMode
             && xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP
             && xpControllerStage == XpControllerStage::MatchTimer
             && State.InMeeting;
@@ -4489,9 +4510,7 @@ namespace PlayersTab {
             xpDrainStopVoterIds.clear();
             xpDrainStopRequested = false;
             xpDrainMeetingAnnouncementPending = true;
-            if (xpProgressMode == XpProgressMode::LegacyChat) {
-                State.rpcQueue.push(new RpcReportBody({}));
-            }
+            State.rpcQueue.push(new RpcReportBody({}, true));
         }
         LogXpControllerEvent(std::format(
             "Game loading completed; starting {}ms round timer ({}s base + {}ms chat wait). {}",
