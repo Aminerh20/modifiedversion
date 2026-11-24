@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cctype>
 #include <deque>
+#include <limits>
 #include <string>
 #include <utility>
 #include "_rpc.h"
@@ -37,6 +38,10 @@ namespace PlayersTab {
     static bool matchCyclePreviousCrewmatesOnly = false;
     static int matchCyclePreviousProtectionIntervalMs = 50;
     static std::vector<Game::PlayerId> matchCyclePreviousProtectionTargets;
+    static bool shieldBreakCountsDirty = false;
+    static std::chrono::steady_clock::time_point lastShieldBreakCountSaveAt =
+        std::chrono::steady_clock::now();
+    static constexpr auto shieldBreakCountSaveInterval = std::chrono::seconds(5);
     static constexpr int matchCycleProtectionIntervalMs = 70;
     static constexpr int matchCycleFourImpostorIntervalMs = 90;
     static bool killToggleUiEnabled = false;
@@ -1666,6 +1671,52 @@ namespace PlayersTab {
         LogXpControllerEvent(std::format(
             "Farming shield target killed: killerId={}, victimId={}, killerProtectedKillCount={}.",
             killerId, victimId, killCount));
+    }
+
+    void OnShieldBreakAttempt(PlayerControl* killer, PlayerControl* protectedPlayer) {
+        if (!IsHost()
+            || !State.ShieldBreakCounterEnabled
+            || killer == nullptr
+            || protectedPlayer == nullptr
+            || !IsProtectionActiveFor(protectedPlayer)) return;
+
+        const auto killerData = GetPlayerData(killer);
+        const auto protectedData = GetPlayerData(protectedPlayer);
+        if (killerData == nullptr
+            || protectedData == nullptr
+            || !PlayerIsImpostor(killerData)
+            || killerData->fields.IsDead
+            || protectedData->fields.IsDead) return;
+
+        std::string identity;
+        if (killerData->fields.Puid != nullptr) {
+            identity = convert_from_string(killerData->fields.Puid);
+            if (!identity.empty()) identity = "puid:" + identity;
+        }
+        if (identity.empty() && killerData->fields.FriendCode != nullptr) {
+            identity = convert_from_string(killerData->fields.FriendCode);
+            if (!identity.empty()) identity = "friend:" + identity;
+        }
+        if (identity.empty()) {
+            identity = std::format("playerid:{}", killer->fields.PlayerId);
+        }
+
+        auto& count = State.ShieldBreakCounts[identity];
+        if (count != (std::numeric_limits<uint64_t>::max)()) ++count;
+        State.ShieldBreakNames[identity] = XpPlayerName(killer);
+        shieldBreakCountsDirty = true;
+        LogXpControllerEvent(std::format(
+            "Shield break attempt blocked: impostor='{}', protectedPlayer='{}', total={}.",
+            State.ShieldBreakNames[identity], XpPlayerName(protectedPlayer),
+            count));
+    }
+
+    void ClearShieldBreakCounts() {
+        State.ShieldBreakCounts.clear();
+        State.ShieldBreakNames.clear();
+        State.Save();
+        shieldBreakCountsDirty = false;
+        lastShieldBreakCountSaveAt = std::chrono::steady_clock::now();
     }
 
     void OnXpControllerPlayerLeft(Game::PlayerId playerId) {
@@ -3370,9 +3421,16 @@ namespace PlayersTab {
 
     void TickXpController() {
         g_rpcEmittedThisFrame = 0;
+        const auto now = std::chrono::steady_clock::now();
+        if (shieldBreakCountsDirty
+            && now - lastShieldBreakCountSaveAt >= shieldBreakCountSaveInterval) {
+            State.Save();
+            shieldBreakCountsDirty = false;
+            lastShieldBreakCountSaveAt = now;
+        }
         RecordConnectedXpLevels();
         if (xpLevelRejoinDeadline != std::chrono::steady_clock::time_point{}
-            && std::chrono::steady_clock::now() >= xpLevelRejoinDeadline) {
+            && now >= xpLevelRejoinDeadline) {
             xpLevelRejoinDeadline = {};
             size_t waitingCount = 0;
             for (auto& [playerId, baseline] : xpLevelBaselines) {
@@ -3397,7 +3455,6 @@ namespace PlayersTab {
         if (xpControllerPaused) return;
         State.NoGameEnd = true;
         ProcessPendingXpControllerRoles();
-        const auto now = std::chrono::steady_clock::now();
         if (!IsHost()) {
             if (xpHostAuthorityLostAt == std::chrono::steady_clock::time_point{}) {
                 xpHostAuthorityLostAt = now;

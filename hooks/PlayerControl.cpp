@@ -1189,8 +1189,10 @@ void dPlayerControl_CheckMurder(PlayerControl* __this, PlayerControl* target, Me
         if (State.SafeMode && State.Enable_SMAC && State.SMAC_CheckMurder) SMAC_OnCheatDetected(__this, "Abnormal Murder Player");
         return; // Don't send direct murder as non-host or in lobby
     }
-    if (!State.PanicMode && PlayersTab::IsProtectionActiveFor(target))
+    if (!State.PanicMode && PlayersTab::IsProtectionActiveFor(target)) {
+        PlayersTab::OnShieldBreakAttempt(__this, target);
         return PlayerControl_RpcMurderPlayer(__this, target, false, NULL);
+    }
     if (IsHost() && State.BattleRoyale && State.DisableHostAnticheat)
         return PlayerControl_RpcMurderPlayer(__this, target, true, NULL); // Force succeed murder in battle royale
     auto pData = GetPlayerData(__this), tData = GetPlayerData(target);

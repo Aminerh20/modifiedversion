@@ -204,6 +204,53 @@ namespace GameTab {
                 ShowHudNotification("Allowed everyone to NoClip!");
             }
 
+            if (IsInGame() || IsInLobby()) {
+                ImGui::Dummy(ImVec2(7, 7) * State.dpiScale);
+                ImGui::Separator();
+                ImGui::TextDisabled("Blocked shield-break attempts by Impostor");
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip(
+                        "Counts each Impostor kill attempt blocked by an active Sicko protection target. "
+                        "This is not a successful kill count.");
+                }
+                if (IsHost()) {
+                    if (ToggleButton("Record shield breaks", &State.ShieldBreakCounterEnabled)) {
+                        State.Save();
+                    }
+                    ImGui::SameLine();
+                    if (AnimatedButton("Reset shield break counts")) {
+                        PlayersTab::ClearShieldBreakCounts();
+                    }
+                }
+                else {
+                    ImGui::TextDisabled("Host only");
+                }
+
+                std::vector<std::pair<std::string, uint64_t>> shieldBreakCounts(
+                    State.ShieldBreakCounts.begin(), State.ShieldBreakCounts.end());
+                std::sort(
+                    shieldBreakCounts.begin(), shieldBreakCounts.end(),
+                    [](const auto& left, const auto& right) {
+                        if (left.second != right.second) return left.second > right.second;
+                        return left.first < right.first;
+                    });
+                if (shieldBreakCounts.empty()) {
+                    ImGui::TextDisabled("No shield-break attempts recorded.");
+                }
+                else {
+                    for (const auto& [identity, count] : shieldBreakCounts) {
+                        const auto name = State.ShieldBreakNames.find(identity);
+                        const std::string displayName = name == State.ShieldBreakNames.end()
+                            ? "Unknown Impostor"
+                            : name->second;
+                        ImGui::Text(
+                            "%s: %llu",
+                            displayName.c_str(),
+                            static_cast<unsigned long long>(count));
+                    }
+                }
+            }
+
             // Match Cycle - host-only round controller with automatic lobby and rollover checks.
             if (IsHost() && IsInLobby()) {
                 ImGui::Dummy(ImVec2(7, 7) * State.dpiScale);

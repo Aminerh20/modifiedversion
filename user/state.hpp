@@ -1,7 +1,9 @@
 #pragma once
 #include <set>
 #include <bitset>
+#include <cstdint>
 #include <queue>
+#include <unordered_map>
 #include <unordered_set>
 #include "_events.h"
 #include "_rpc.h"
@@ -842,6 +844,9 @@ public:
 
     std::vector<std::string> WhitelistFriendCodes = {};
     std::vector<std::string> BlacklistFriendCodes = {};
+    bool ShieldBreakCounterEnabled = false;
+    std::unordered_map<std::string, uint64_t> ShieldBreakCounts;
+    std::unordered_map<std::string, std::string> ShieldBreakNames;
 
     std::vector<std::string> LockedNames = {};
 

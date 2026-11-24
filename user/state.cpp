@@ -585,6 +585,9 @@ void Settings::Load() {
 
         JSON_TRYGET("WhitelistFriendCodes", this->WhitelistFriendCodes);
         JSON_TRYGET("BlacklistFriendCodes", this->BlacklistFriendCodes);
+        JSON_TRYGET("ShieldBreakCounterEnabled", this->ShieldBreakCounterEnabled);
+        JSON_TRYGET("ShieldBreakCounts", this->ShieldBreakCounts);
+        JSON_TRYGET("ShieldBreakNames", this->ShieldBreakNames);
         JSON_TRYGET("WarnedFriendCodes", this->WarnedFriendCodes);
         JSON_TRYGET("WarnReasons", this->WarnReasons);
         JSON_TRYGET("LockedNames", this->LockedNames);
@@ -1296,6 +1299,9 @@ void Settings::Save() {
 
                 { "WhitelistFriendCodes", this->WhitelistFriendCodes },
                 { "BlacklistFriendCodes", this->BlacklistFriendCodes },
+                { "ShieldBreakCounterEnabled", this->ShieldBreakCounterEnabled },
+                { "ShieldBreakCounts", this->ShieldBreakCounts },
+                { "ShieldBreakNames", this->ShieldBreakNames },
                 { "WarnedFriendCodes", this->WarnedFriendCodes },
                 { "WarnReasons", this->WarnReasons },
                 { "LockedNames", this->LockedNames },
