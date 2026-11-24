@@ -87,6 +87,11 @@ namespace PlayersTab {
         bool was_impostor_this_round = false;
         bool farmed_this_round = false;
         bool demoted_to_ghost_this_round = false;
+        bool has_lobby_base_level = false;
+        uint32_t lobby_base_level = 0;
+        bool drain_plateaued = false;
+        bool level_patch_rejoin_required = false;
+        bool drain_eligible = true;
         std::string puid;
         std::string friend_code;
         std::string name;
@@ -137,6 +142,7 @@ namespace PlayersTab {
         bool hasFarmingRotationCursor = false;
         std::vector<Game::PlayerId> roundImpostorIds;
         std::vector<std::string> roundImpostorNames;
+        std::unordered_map<Game::PlayerId, XpTrackedPlayer> trackedPlayers;
         std::unordered_set<Game::PlayerId> completedPlayerIds;
         std::unordered_set<Game::PlayerId> retryPlayerIds;
         std::unordered_map<Game::PlayerId, bool> confirmationResponses;
@@ -176,6 +182,10 @@ namespace PlayersTab {
     static std::unordered_set<Game::PlayerId> xpDeferredFarmingRetryUsedIds;
     static bool xpDeferredFarmingRetryActive = false;
     static std::unordered_map<Game::PlayerId, int> xpRoundProtectedKillCounts;
+    static std::unordered_map<Game::PlayerId, bool> xpPreFarmingMoveableState;
+    static std::unordered_map<Game::PlayerId, Game::PlayerId> xpFarmingTargetAssignments;
+    static std::vector<Vector2> xpFarmingAnchors;
+    static bool xpFarmingDoorsPrepared = false;
     static std::unordered_set<Game::PlayerId> xpRoundGhostedImpostorIds;
     static bool xpFarmingSafetyWarningsPending = false;
     static size_t xpPendingGhostRoleQueueTicks = 0;
@@ -224,6 +234,7 @@ namespace PlayersTab {
     static bool xpDrainBonusBatchPendingStart = false;
     static bool xpDrainFarmingPromptGracePending = false;
     static bool xpSoloKeepAliveRound = false;
+    static bool xpNoParticipantsLogged = false;
     static bool xpSoloKeepAliveNeedsRoundSetup = false;
     static XpControllerPhase xpSoloResumePhase = XpControllerPhase::STOPPED;
     static XpControllerStage xpSoloResumeStage = XpControllerStage::PreparingRound;
@@ -274,6 +285,8 @@ namespace PlayersTab {
     static void SetShieldState(Game::PlayerId playerId, bool enabled);
     static void RestoreMatchCycleProtectionSettings();
     static void RecordXpLevelSnapshot(const std::string& reason);
+    static void ReconcileXpFarmingPositions();
+    static uint32_t GetXpObservedLevel(Game::PlayerId playerId);
 
     static bool IsLocalXpPlayer(const PlayerControl* player) {
         return player != nullptr
@@ -696,8 +709,14 @@ namespace PlayersTab {
                 }
             }
 
-            auto it = xpTrackedPlayers.try_emplace(playerId).first;
+            const auto [it, inserted] = xpTrackedPlayers.try_emplace(playerId);
             auto& tracked = it->second;
+            if (inserted && xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP) {
+                tracked.drain_eligible = false;
+                LogXpControllerEvent(std::format(
+                    "New participant joined during draining; deferred to the next farming phase: playerId={}, name='{}'.",
+                    playerId, XpPlayerName(player)));
+            }
             tracked.name = XpPlayerName(player);
             tracked.is_host = IsMatchCycleHost(player);
             if (!puid.empty()) tracked.puid = puid;
@@ -706,6 +725,22 @@ namespace PlayersTab {
             if (!tracked.is_host && tracked.needs_rejoin && tracked.disconnected_after_rejoin_request) {
                 tracked.needs_rejoin = false;
                 tracked.disconnected_after_rejoin_request = false;
+                tracked.drain_plateaued = false;
+                tracked.level_patch_rejoin_required = false;
+                tracked.drain_eligible = true;
+                LogXpControllerEvent(std::format(
+                    "Participant rejoined after a level rejoin request; drain eligibility restored: playerId={}, name='{}'.",
+                    playerId, tracked.name));
+            }
+            if (!tracked.is_host && IsInLobby() && !tracked.has_lobby_base_level) {
+                const uint32_t level = GetXpObservedLevel(playerId);
+                if (level != 0) {
+                    tracked.lobby_base_level = level;
+                    tracked.has_lobby_base_level = true;
+                    LogXpControllerEvent(std::format(
+                        "Captured lobby base level: playerId={}, name='{}', level={}.",
+                        playerId, tracked.name, level));
+                }
             }
             tracked.connected = true;
         }
@@ -767,6 +802,7 @@ namespace PlayersTab {
             tracked.farmed_this_round = true;
             tracked.has_earned_xp = true;
             tracked.has_completed_objective = true;
+            tracked.drain_eligible = true;
             xpFarmingCompletedPlayerIds.insert(playerId);
             xpFarmingRetryPlayerIds.erase(playerId);
             ++creditedCount;
@@ -793,6 +829,9 @@ namespace PlayersTab {
         for (auto& entry : xpTrackedPlayers) {
             auto& tracked = entry.second;
             if (tracked.is_host) continue;
+            if (xpProgressMode != XpProgressMode::LegacyChat
+                && !tracked.drain_plateaued
+                && !tracked.level_patch_rejoin_required) continue;
             tracked.needs_rejoin = true;
             tracked.disconnected_after_rejoin_request = !tracked.connected;
             ++rejoinParticipantCount;
@@ -931,6 +970,7 @@ namespace PlayersTab {
             reason, BuildXpControllerDiagnostics()));
         xpControllerPhase = XpControllerPhase::STOPPED;
         xpControllerStage = XpControllerStage::PreparingRound;
+        EndXpFarmingRound();
         xpControllerPaused = false;
         xpPauseDeadlineRemainingMs = 0;
         xpControllerSnapshot.valid = false;
@@ -1194,7 +1234,9 @@ namespace PlayersTab {
                 players.size(), participantCount, XpControllerPhaseName(xpControllerPhase),
                 XpControllerStageName(xpControllerStage)));
             if (participantCount == 0) {
-                EnterSoloLobbyKeepAlive(std::chrono::steady_clock::now(), true);
+                xpControllerStage = XpControllerStage::LobbyDelay;
+                xpControllerDeadline = std::chrono::steady_clock::now()
+                    + std::chrono::seconds(1);
             }
             else {
                 StopXpController("No connected host player is available for team setup.");
@@ -1228,6 +1270,9 @@ namespace PlayersTab {
             if (!IsMatchCycleHost(player)) nonHostPlayers.push_back(player);
         }
 
+        const Game::PlayerId cursorBefore =
+            xpHasFarmingRotationCursor ? xpFarmingRotationCursor
+            : nonHostPlayers.empty() ? Game::PlayerId{} : nonHostPlayers.front()->fields.PlayerId;
         size_t startIndex = 0;
         if (unearnedOnly && xpHasFarmingRotationCursor) {
             const auto nextPlayer = std::lower_bound(
@@ -1250,6 +1295,7 @@ namespace PlayersTab {
                 auto player = nonHostPlayers[index];
                 auto it = xpTrackedPlayers.find(player->fields.PlayerId);
                 if (it == xpTrackedPlayers.end()
+                    || (unearnedOnly && it->second.needs_rejoin)
                     || (unearnedOnly && (xpFarmingCompletedPlayerIds.contains(player->fields.PlayerId)
                         || it->second.has_completed_objective))
                     || (unearnedOnly && skipAttempted && it->second.has_farming_attempt)) continue;
@@ -1271,6 +1317,9 @@ namespace PlayersTab {
                         playerId));
                     continue;
                 }
+                const auto tracked = xpTrackedPlayers.find(playerId);
+                if (tracked == xpTrackedPlayers.end() || tracked->second.needs_rejoin)
+                    continue;
                 if (impostors.size() >= static_cast<size_t>((std::max)(teamCap, 0))) {
                     stillConnected.push_back(playerId);
                     continue;
@@ -1294,6 +1343,7 @@ namespace PlayersTab {
                     if (it == xpTrackedPlayers.end()
                         || xpFarmingCompletedPlayerIds.contains(playerId)
                         || it->second.has_completed_objective
+                        || it->second.needs_rejoin
                         || (!retryPriority && it->second.has_farming_attempt)
                         || (retryPriority != xpFarmingRetryPlayerIds.contains(playerId))) continue;
                     impostors.push_back(player);
@@ -1324,6 +1374,7 @@ namespace PlayersTab {
                     || alreadySelected
                     || xpFarmingCompletedPlayerIds.contains(playerId)
                     || tracked->second.has_completed_objective
+                    || tracked->second.needs_rejoin
                     || xpDeferredFarmingRetryIds.contains(playerId)) continue;
                 impostors.push_back(player);
                 lastSelectedIndex = index;
@@ -1361,6 +1412,8 @@ namespace PlayersTab {
                 if (!xpDeferredFarmingRetryIds.contains(playerId)) continue;
                 if (xpDeferredFarmingRetryUsedIds.contains(playerId)) continue;
                 if (xpFarmingCompletedPlayerIds.contains(playerId)) continue;
+                const auto tracked = xpTrackedPlayers.find(playerId);
+                if (tracked == xpTrackedPlayers.end() || tracked->second.needs_rejoin) continue;
                 impostors.push_back(player);
                 xpDeferredFarmingRetryUsedIds.insert(playerId);
             }
@@ -1427,9 +1480,10 @@ namespace PlayersTab {
             xpTrackedPlayers[player->fields.PlayerId].is_impostor = true;
         }
         LogXpControllerEvent(std::format(
-            "Configuring teams: phase={}, connectedPlayers={}, connectedNonHost={}, attackerCap={}, attackersSelected={}, attackerIds=[{}], shieldCap={}.",
+            "Configuring teams: phase={}, connectedPlayers={}, connectedNonHost={}, attackerCap={}, attackersSelected={}, attackerIds=[{}], rotationCursorBefore={}, rotationCursorAfter={}, shieldCap={}.",
             XpControllerPhaseName(xpControllerPhase), players.size(), participantCount, teamCap,
-            impostors.size(), impostorIds, teamCap));
+            impostors.size(), impostorIds, cursorBefore,
+            xpHasFarmingRotationCursor ? xpFarmingRotationCursor : Game::PlayerId{}, teamCap));
         if (unearnedOnly) {
             std::vector<std::string> selectedNames;
             for (auto player : impostors) selectedNames.push_back(XpPlayerName(player));
@@ -1535,7 +1589,9 @@ namespace PlayersTab {
         }
         else {
             for (const auto& [playerId, tracked] : xpTrackedPlayers) {
-                if (!tracked.is_host) captureIds.push_back(playerId);
+                if (!tracked.is_host && tracked.connected && tracked.drain_eligible
+                    && !tracked.drain_plateaued)
+                    captureIds.push_back(playerId);
             }
         }
 
@@ -1558,7 +1614,7 @@ namespace PlayersTab {
                 && !tracked->second.disconnected_during_farming_round
                 && baseline != xpRoundLevelBaselines.end()
                 && baseline->second != 0
-                && currentLevel >= baseline->second + 1
+                && currentLevel == baseline->second + 1
                 && !xpRoundGhostedBeforeFiftyPercentIds.contains(playerId);
 
             tracked->second.has_earned_xp = leveledUp;
@@ -1567,9 +1623,21 @@ namespace PlayersTab {
             if (leveledUp) {
                 xpFarmingCompletedPlayerIds.insert(playerId);
                 xpFarmingRetryPlayerIds.erase(playerId);
+                tracked->second.drain_eligible = true;
                 ++completedCount;
             }
             else {
+                if (tracked->second.has_lobby_base_level
+                    && baseline != xpRoundLevelBaselines.end()
+                    && baseline->second < tracked->second.lobby_base_level
+                    && currentLevel >= tracked->second.lobby_base_level) {
+                    tracked->second.level_patch_rejoin_required = true;
+                    tracked->second.needs_rejoin = true;
+                    tracked->second.disconnected_after_rejoin_request = false;
+                    QueueXpControllerChat(std::format(
+                        "{}'s level changed to the saved/base range; rejoin the lobby to refresh it.",
+                        XpControllerChatName(tracked->second.name)));
+                }
                 xpFarmingCompletedPlayerIds.erase(playerId);
                 xpFarmingRetryPlayerIds.insert(playerId);
             }
@@ -1579,30 +1647,72 @@ namespace PlayersTab {
                 XpControllerChatName(tracked->second.name),
                 leveledUp ? "leveled up" : "retry");
             LogXpControllerEvent(std::format(
-                "Farming level result: playerId={}, name='{}', baseline={}, current={}, leveledUp={}.",
+                "Farming level result: playerId={}, name='{}', baseline={}, current={}, expectedExactlyOneLevel={}, patchRejoinRequired={}.",
                 playerId, tracked->second.name,
                 baseline == xpRoundLevelBaselines.end() ? 0 : baseline->second,
-                currentLevel, leveledUp));
+                currentLevel, leveledUp, tracked->second.level_patch_rejoin_required));
         }
         QueueXpControllerChat(resultSummary + ".");
         return completedCount == xpRoundImpostorIds.size();
     }
 
     static bool EvaluateXpLevelDrainRound() {
-        size_t activeCount = 0;
-        size_t leveledCount = 0;
+        size_t progressingCount = 0;
+        size_t plateauCount = 0;
+        size_t unknownCount = 0;
         for (const auto& [playerId, tracked] : xpTrackedPlayers) {
-            if (tracked.is_host) continue;
+            if (tracked.is_host || !tracked.drain_eligible || tracked.drain_plateaued) continue;
             const auto baseline = xpRoundLevelBaselines.find(playerId);
-            if (baseline == xpRoundLevelBaselines.end()) continue;
+            if (!tracked.connected || baseline == xpRoundLevelBaselines.end()) {
+                ++unknownCount;
+                continue;
+            }
             const uint32_t currentLevel = GetXpObservedLevel(playerId);
-            ++activeCount;
-            if (currentLevel >= baseline->second + 1) ++leveledCount;
+            if (currentLevel == 0) {
+                ++unknownCount;
+                continue;
+            }
+            if (tracked.has_lobby_base_level
+                && baseline->second < tracked.lobby_base_level
+                && currentLevel >= tracked.lobby_base_level) {
+                auto& mutableTracked = xpTrackedPlayers[playerId];
+                mutableTracked.level_patch_rejoin_required = true;
+                mutableTracked.drain_plateaued = true;
+                mutableTracked.needs_rejoin = true;
+                mutableTracked.disconnected_after_rejoin_request = false;
+                ++plateauCount;
+                QueueXpControllerChat(std::format(
+                    "{}'s level appears patched; rejoin the lobby to refresh it.",
+                    XpControllerChatName(tracked.name)));
+                LogXpControllerEvent(std::format(
+                    "Detected level patch/reset during drain: playerId={}, baseline={}, current={}, lobbyBase={}; rejoin required.",
+                    playerId, baseline->second, currentLevel, tracked.lobby_base_level));
+            }
+            else if (currentLevel > baseline->second) {
+                ++progressingCount;
+            }
+            else {
+                auto& mutableTracked = xpTrackedPlayers[playerId];
+                mutableTracked.drain_plateaued = true;
+                mutableTracked.needs_rejoin = true;
+                mutableTracked.disconnected_after_rejoin_request = false;
+                ++plateauCount;
+                QueueXpControllerChat(std::format(
+                    "{}'s XP has drained; rejoin the lobby to refresh your level.",
+                    XpControllerChatName(tracked.name)));
+                LogXpControllerEvent(std::format(
+                    "Participant level plateaued during drain: playerId={}, name='{}', baseline={}, current={}; rejoin required.",
+                    playerId, tracked.name, baseline->second, currentLevel));
+            }
         }
         LogXpControllerEvent(std::format(
-            "Drain level result: round={}, active={}, leveledUp={}.",
-            xpDrainRoundsCompleted + 1, activeCount, leveledCount));
-        return activeCount > 0 && leveledCount == activeCount;
+            "Drain level result: round={}, progressing={}, plateauedThisRound={}, unknown={}, alreadyDrained={}.",
+            xpDrainRoundsCompleted + 1, progressingCount, plateauCount, unknownCount,
+            std::count_if(xpTrackedPlayers.begin(), xpTrackedPlayers.end(),
+                [](const auto& entry) {
+                    return !entry.second.is_host && entry.second.drain_plateaued;
+                })));
+        return progressingCount > 0 || unknownCount > 0;
     }
 
     static bool DemoteFastestFarmingImpostorToGhost() {
@@ -1734,8 +1844,17 @@ namespace PlayersTab {
         if (!IsXpControllerRunning()) return;
 
         auto tracked = xpTrackedPlayers.find(playerId);
-        if (tracked == xpTrackedPlayers.end()) return;
+        if (tracked == xpTrackedPlayers.end()) {
+            LogXpControllerEvent(std::format(
+                "Untracked player disconnected; cycle continues without pausing: playerId={}.",
+                playerId));
+            return;
+        }
         tracked->second.connected = false;
+        LogXpControllerEvent(std::format(
+            "Player disconnected; cycle continues without pausing: playerId={}, name='{}', phase={}, stage={}.",
+            playerId, tracked->second.name, XpControllerPhaseName(xpControllerPhase),
+            XpControllerStageName(xpControllerStage)));
         if (xpControllerPhase != XpControllerPhase::FARMING_ROUND
             || std::find(
                 xpRoundImpostorIds.begin(), xpRoundImpostorIds.end(), playerId)
@@ -1749,6 +1868,243 @@ namespace PlayersTab {
         LogXpControllerEvent(std::format(
             "Assigned farming participant disconnected; completion revoked pending a later successful batch: playerId={}, name='{}'.",
             playerId, tracked->second.name));
+    }
+
+    bool IsXpFarmingRound() {
+        return IsHost()
+            && IsXpControllerRunning()
+            && IsInGame()
+            && xpControllerPhase == XpControllerPhase::FARMING_ROUND
+            && xpControllerStage == XpControllerStage::MatchTimer;
+    }
+
+    static std::optional<Vector2> GetXpFarmingRoomAnchor(SystemTypes__Enum roomId) {
+        if (Game::pShipStatus == nullptr || *Game::pShipStatus == nullptr) return std::nullopt;
+        for (auto room : il2cpp::Array((*Game::pShipStatus)->fields._AllRooms_k__BackingField)) {
+            if (room == nullptr || room->fields.RoomId != roomId || room->fields.roomArea == nullptr) continue;
+            auto transform = app::Component_get_transform(
+                reinterpret_cast<Component_1*>(room->fields.roomArea), nullptr);
+            if (transform == nullptr) continue;
+            auto position = app::Transform_get_position(transform, nullptr);
+            Vector2 anchor{ position.x, position.y };
+            if (app::Collider2D_OverlapPoint(room->fields.roomArea, anchor, nullptr))
+                return anchor;
+        }
+        return std::nullopt;
+    }
+
+    static void EjectXpPlayersFromVents() {
+        if (Game::pShipStatus == nullptr || *Game::pShipStatus == nullptr) return;
+        for (auto player : GetConnectedXpPlayers()) {
+            if (player == nullptr || !player->fields.inVent || player->fields.MyPhysics == nullptr) continue;
+            const auto position = PlayerControl_GetTruePosition(player, nullptr);
+            Vent* nearestVent = nullptr;
+            float nearestDistance = (std::numeric_limits<float>::max)();
+            for (auto vent : il2cpp::Array((*Game::pShipStatus)->fields._AllVents_k__BackingField)) {
+                if (vent == nullptr) continue;
+                auto transform = app::Component_get_transform(
+                    reinterpret_cast<Component_1*>(vent), nullptr);
+                if (transform == nullptr) continue;
+                const auto ventPosition = app::Transform_get_position(transform, nullptr);
+                const float distance = app::Vector2_Distance(
+                    position, { ventPosition.x, ventPosition.y }, nullptr);
+                if (distance < nearestDistance) {
+                    nearestDistance = distance;
+                    nearestVent = vent;
+                }
+            }
+            if (nearestVent != nullptr) {
+                PlayerPhysics_RpcExitVent(
+                    player->fields.MyPhysics, nearestVent->fields.Id, nullptr);
+                player->fields.inVent = false;
+                LogXpControllerEvent(std::format(
+                    "Forced player out of a vent before farming: playerId={}, ventId={}.",
+                    player->fields.PlayerId, nearestVent->fields.Id));
+            }
+        }
+    }
+
+    void PrepareXpFarmingRound() {
+        if (!IsXpFarmingRound() || xpFarmingDoorsPrepared) return;
+        EjectXpPlayersFromVents();
+        xpFarmingAnchors.clear();
+        static constexpr SystemTypes__Enum preferredRooms[] = {
+            SystemTypes__Enum::Admin,
+            SystemTypes__Enum::LowerEngine,
+            SystemTypes__Enum::UpperEngine,
+            SystemTypes__Enum::Nav,
+            SystemTypes__Enum::Electrical,
+            SystemTypes__Enum::Weapons,
+            SystemTypes__Enum::Storage,
+            SystemTypes__Enum::MedBay,
+            SystemTypes__Enum::Cafeteria,
+        };
+        for (const auto roomId : preferredRooms) {
+            auto anchor = GetXpFarmingRoomAnchor(roomId);
+            if (!anchor.has_value()) continue;
+            if (std::none_of(xpFarmingAnchors.begin(), xpFarmingAnchors.end(),
+                [&](const Vector2& other) {
+                    return app::Vector2_Distance(*anchor, other, nullptr) < 1.f;
+                })) {
+                xpFarmingAnchors.push_back(*anchor);
+            }
+        }
+        if (Game::pShipStatus != nullptr && *Game::pShipStatus != nullptr) {
+            for (auto room : il2cpp::Array(
+                (*Game::pShipStatus)->fields._AllRooms_k__BackingField)) {
+                if (room == nullptr || room->fields.roomArea == nullptr
+                    || room->fields.RoomId == SystemTypes__Enum::Hallway
+                    || room->fields.RoomId == SystemTypes__Enum::Outside
+                    || room->fields.RoomId == SystemTypes__Enum::Decontamination
+                    || room->fields.RoomId == SystemTypes__Enum::Decontamination2
+                    || room->fields.RoomId == SystemTypes__Enum::Decontamination3)
+                    continue;
+                auto transform = app::Component_get_transform(
+                    reinterpret_cast<Component_1*>(room->fields.roomArea), nullptr);
+                if (transform == nullptr) continue;
+                const auto position = app::Transform_get_position(transform, nullptr);
+                const Vector2 anchor{ position.x, position.y };
+                if (!app::Collider2D_OverlapPoint(room->fields.roomArea, anchor, nullptr))
+                    continue;
+                if (std::none_of(xpFarmingAnchors.begin(), xpFarmingAnchors.end(),
+                    [&](const Vector2& other) {
+                        return app::Vector2_Distance(anchor, other, nullptr) < 1.f;
+                    })) {
+                    xpFarmingAnchors.push_back(anchor);
+                }
+            }
+        }
+        for (const auto roomId : State.mapDoors) {
+            State.rpcQueue.push(new RpcCloseDoorsOfType(roomId, false));
+        }
+        xpFarmingDoorsPrepared = true;
+        LogXpControllerEvent(std::format(
+            "Prepared farming map controls: availableRoomAnchors={}, doorsClosed={}, ventsEjected.",
+            xpFarmingAnchors.size(), State.mapDoors.size()));
+        if (xpFarmingAnchors.empty()) {
+            LogXpControllerEvent(
+                "No supported room anchors were found on this map; farming restrictions remain active, but player placement is skipped.");
+        }
+        ReconcileXpFarmingPositions();
+    }
+
+    static void ReconcileXpFarmingPositions() {
+        if (!IsXpFarmingRound() || xpFarmingAnchors.empty()) return;
+        std::vector<PlayerControl*> impostors;
+        for (const auto playerId : xpRoundImpostorIds) {
+            auto player = GetPlayerControlById(playerId);
+            auto data = player == nullptr ? nullptr : GetPlayerData(player);
+            if (player != nullptr && data != nullptr && !data->fields.IsDead)
+                impostors.push_back(player);
+        }
+        std::vector<PlayerControl*> protectedPlayers;
+        for (const auto& [playerId, tracked] : xpTrackedPlayers) {
+            if (!tracked.is_shielded) continue;
+            auto player = GetPlayerControlById(playerId);
+            auto data = player == nullptr ? nullptr : GetPlayerData(player);
+            if (player != nullptr && data != nullptr && !data->fields.IsDead)
+                protectedPlayers.push_back(player);
+        }
+        std::sort(protectedPlayers.begin(), protectedPlayers.end(),
+            [](PlayerControl* left, PlayerControl* right) {
+                return left->fields.PlayerId < right->fields.PlayerId;
+            });
+
+        std::unordered_set<Game::PlayerId> assignedTargets;
+        for (size_t i = 0; i < impostors.size(); ++i) {
+            if (i >= xpFarmingAnchors.size()) {
+                LogXpControllerEvent(std::format(
+                    "Map has only {} distinct farming rooms for {} active Impostors; remaining pairs are left in place rather than sharing a farming room.",
+                    xpFarmingAnchors.size(), impostors.size()));
+                break;
+            }
+            auto impostor = impostors[i];
+            PlayerControl* target = nullptr;
+            const auto previous = xpFarmingTargetAssignments.find(impostor->fields.PlayerId);
+            if (previous != xpFarmingTargetAssignments.end()
+                && !assignedTargets.contains(previous->second)) {
+                auto oldTarget = GetPlayerControlById(previous->second);
+                auto oldTargetData = oldTarget == nullptr ? nullptr : GetPlayerData(oldTarget);
+                if (oldTarget != nullptr && oldTargetData != nullptr
+                    && !oldTargetData->fields.IsDead
+                    && std::find(protectedPlayers.begin(), protectedPlayers.end(), oldTarget)
+                        != protectedPlayers.end()) {
+                    target = oldTarget;
+                }
+            }
+            if (target == nullptr) {
+                for (auto candidate : protectedPlayers) {
+                    if (!assignedTargets.contains(candidate->fields.PlayerId)) {
+                        target = candidate;
+                        break;
+                    }
+                }
+            }
+            if (target == nullptr) continue;
+
+            const bool targetChanged = previous == xpFarmingTargetAssignments.end()
+                || previous->second != target->fields.PlayerId;
+            assignedTargets.insert(target->fields.PlayerId);
+            xpFarmingTargetAssignments[impostor->fields.PlayerId] = target->fields.PlayerId;
+            const auto anchor = xpFarmingAnchors[i];
+            const Vector2 impostorPosition{ anchor.x - 0.65f, anchor.y };
+            const auto currentImpostorPosition = PlayerControl_GetTruePosition(impostor, nullptr);
+            const bool impostorNeedsSnap =
+                app::Vector2_Distance(currentImpostorPosition, impostorPosition, nullptr) > 2.5f;
+            if (impostorNeedsSnap)
+                State.rpcQueue.push(new RpcForceSnapTo(impostor, impostorPosition));
+            const Vector2 targetPosition = targetChanged && !impostorNeedsSnap
+                ? Vector2{ currentImpostorPosition.x + 0.65f, currentImpostorPosition.y }
+                : Vector2{ anchor.x + 0.65f, anchor.y };
+
+            if (!xpPreFarmingMoveableState.contains(target->fields.PlayerId))
+                xpPreFarmingMoveableState[target->fields.PlayerId] = target->fields.moveable;
+            target->fields.moveable = false;
+
+            const auto currentTargetPosition = PlayerControl_GetTruePosition(target, nullptr);
+            if (targetChanged
+                || app::Vector2_Distance(currentTargetPosition, targetPosition, nullptr) > 0.8f) {
+                State.rpcQueue.push(new RpcForceSnapTo(target, targetPosition));
+            }
+        }
+
+        for (auto it = xpPreFarmingMoveableState.begin(); it != xpPreFarmingMoveableState.end();) {
+            if (assignedTargets.contains(it->first)) {
+                ++it;
+                continue;
+            }
+            auto player = GetPlayerControlById(it->first);
+            if (player != nullptr) player->fields.moveable = it->second;
+            it = xpPreFarmingMoveableState.erase(it);
+        }
+    }
+
+    void TickXpFarmingRound() {
+        if (!IsXpFarmingRound()) {
+            EndXpFarmingRound();
+            return;
+        }
+        if (!xpFarmingDoorsPrepared) PrepareXpFarmingRound();
+        else ReconcileXpFarmingPositions();
+    }
+
+    void EndXpFarmingRound() {
+        const bool hadFarmingSetup = xpFarmingDoorsPrepared
+            || !xpPreFarmingMoveableState.empty()
+            || !xpFarmingTargetAssignments.empty();
+        if (!hadFarmingSetup) return;
+        if (IsInGame() && Game::pShipStatus != nullptr && *Game::pShipStatus != nullptr) {
+            for (const auto roomId : State.mapDoors)
+                State.rpcQueue.push(new RpcOpenDoorsOfType(roomId));
+        }
+        for (const auto& [playerId, moveable] : xpPreFarmingMoveableState) {
+            auto player = GetPlayerControlById(playerId);
+            if (player != nullptr) player->fields.moveable = moveable;
+        }
+        xpPreFarmingMoveableState.clear();
+        xpFarmingTargetAssignments.clear();
+        xpFarmingAnchors.clear();
+        xpFarmingDoorsPrepared = false;
     }
 
     void OnXpControllerChatSent() {
@@ -1897,7 +2253,11 @@ namespace PlayersTab {
         if (!IsInLobby() || !IsHost()) return;
         xpControllerPhase = XpControllerPhase::FARMING_ROUND;
         if (GetConnectedNonHostCount() == 0) {
-            EnterSoloLobbyKeepAlive(std::chrono::steady_clock::now(), true);
+            xpControllerStage = XpControllerStage::LobbyDelay;
+            xpControllerDeadline = std::chrono::steady_clock::now()
+                + std::chrono::seconds(1);
+            LogXpControllerEvent(
+                "Farming deferred because no participants are connected; the cycle remains active.");
             return;
         }
         if (!ConfigureMatchCycleTeams(true)) return;
@@ -1945,7 +2305,11 @@ namespace PlayersTab {
         if (!IsInLobby() || !IsHost()) return;
         xpControllerPhase = XpControllerPhase::ROLLOVER_LOOP;
         if (GetConnectedNonHostCount() == 0) {
-            EnterSoloLobbyKeepAlive(std::chrono::steady_clock::now(), true);
+            xpControllerStage = XpControllerStage::LobbyDelay;
+            xpControllerDeadline = std::chrono::steady_clock::now()
+                + std::chrono::seconds(1);
+            LogXpControllerEvent(
+                "Drain round deferred because no participants are connected; the cycle remains active.");
             return;
         }
         if (!ConfigureMatchCycleTeams(false)) return;
@@ -2247,6 +2611,7 @@ namespace PlayersTab {
     }
 
     static void HandleXpRoundReturnedToLobby() {
+        EndXpFarmingRound();
         if (xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP) {
             ++xpDrainRoundsCompleted;
             if (xpProgressMode != XpProgressMode::LegacyChat) {
@@ -2518,12 +2883,14 @@ namespace PlayersTab {
             return;
         }
         if (GetConnectedNonHostCount() == 0) {
-            LogXpControllerEvent(std::format(
-                "{}s lobby delay expired with zero non-host players; pausing before XP evaluation. inLobby={}, stage={}.",
-                xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP
-                    ? xpDrainBetweenRoundRejoinSeconds : 20,
-                IsInLobby(), XpControllerStageName(xpControllerStage)));
-            EnterSoloLobbyKeepAlive(std::chrono::steady_clock::now());
+            xpControllerDeadline = std::chrono::steady_clock::now()
+                + std::chrono::seconds(1);
+            if (!xpNoParticipantsLogged) {
+                LogXpControllerEvent(std::format(
+                    "Lobby delay continues with no connected participants; no round is started and the cycle remains active. inLobby={}, stage={}.",
+                    IsInLobby(), XpControllerStageName(xpControllerStage)));
+                xpNoParticipantsLogged = true;
+            }
             return;
         }
 
@@ -2738,6 +3105,7 @@ namespace PlayersTab {
         xpControllerSnapshot.hasFarmingRotationCursor = xpHasFarmingRotationCursor;
         xpControllerSnapshot.roundImpostorIds = xpRoundImpostorIds;
         xpControllerSnapshot.roundImpostorNames = xpRoundImpostorNames;
+        xpControllerSnapshot.trackedPlayers = xpTrackedPlayers;
         xpControllerSnapshot.completedPlayerIds = xpFarmingCompletedPlayerIds;
         xpControllerSnapshot.retryPlayerIds = xpFarmingRetryPlayerIds;
         xpControllerSnapshot.confirmationResponses = xpFarmingConfirmationResponses;
@@ -2801,6 +3169,7 @@ namespace PlayersTab {
         xpHasFarmingRotationCursor = xpControllerSnapshot.hasFarmingRotationCursor;
         xpRoundImpostorIds = xpControllerSnapshot.roundImpostorIds;
         xpRoundImpostorNames = xpControllerSnapshot.roundImpostorNames;
+        xpTrackedPlayers = xpControllerSnapshot.trackedPlayers;
         xpFarmingCompletedPlayerIds = xpControllerSnapshot.completedPlayerIds;
         xpFarmingRetryPlayerIds = xpControllerSnapshot.retryPlayerIds;
         xpFarmingConfirmationResponses = xpControllerSnapshot.confirmationResponses;
@@ -3586,6 +3955,7 @@ namespace PlayersTab {
         xpPauseDeadlineRemainingMs = 0;
         xpControllerSnapshot.valid = false;
         xpHasFarmingRotationCursor = false;
+        xpNoParticipantsLogged = false;
         xpFarmingCycleAnnouncementPending = true;
         State.ForceEndAfterStartTriggered = false;
         for (auto player : GetConnectedXpPlayers()) {
@@ -3748,6 +4118,7 @@ namespace PlayersTab {
                 BuildXpControllerDiagnostics()));
             xpHostAuthorityLostAt = {};
         }
+        TickXpFarmingRound();
         TickXpControllerChat();
         const bool inLobby = IsInLobby();
         const bool transitioningToLobby = inLobby
@@ -3767,10 +4138,13 @@ namespace PlayersTab {
                 return;
             }
         }
-        else if (inLobby && !transitioningToLobby
-            && GetConnectedNonHostCount() == 0) {
-            EnterSoloLobbyKeepAlive(now);
-            return;
+        if (inLobby && GetConnectedNonHostCount() == 0 && !xpNoParticipantsLogged) {
+            LogXpControllerEvent(
+                "All non-host participants disconnected; cycle remains active and no round is paused or auto-started.");
+            xpNoParticipantsLogged = true;
+        }
+        else if (GetConnectedNonHostCount() > 0) {
+            xpNoParticipantsLogged = false;
         }
         if (!transitioningToLobby && !lobbyDelayPending) {
             SynchronizeXpPlayers();
@@ -3798,7 +4172,14 @@ namespace PlayersTab {
         }
         switch (xpControllerStage) {
         case XpControllerStage::PreparingRound:
-            if (IsInLobby() && now >= xpControllerDeadline) StartPreparedXpMatch();
+            if (IsInLobby() && now >= xpControllerDeadline) {
+                if (GetConnectedNonHostCount() == 0) {
+                    xpControllerDeadline = now + std::chrono::seconds(1);
+                }
+                else {
+                    StartPreparedXpMatch();
+                }
+            }
             break;
         case XpControllerStage::AwaitingMatch:
             if (xpSoloKeepAliveRound && IsInGame()) {
@@ -3986,6 +4367,7 @@ namespace PlayersTab {
                         const auto tracked = xpTrackedPlayers.find(player->fields.PlayerId);
                         return tracked == xpTrackedPlayers.end()
                             || (!xpFarmingCompletedPlayerIds.contains(player->fields.PlayerId)
+                                && !tracked->second.needs_rejoin
                                 && !tracked->second.has_completed_objective);
                     });
                 if (connectedParticipantNeedsFarming) {

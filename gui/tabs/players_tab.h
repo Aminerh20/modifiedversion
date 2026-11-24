@@ -78,6 +78,10 @@ namespace PlayersTab {
 	void OnShieldBreakAttempt(PlayerControl* killer, PlayerControl* protectedPlayer);
 	void ClearShieldBreakCounts();
 	void OnXpControllerPlayerLeft(Game::PlayerId playerId);
+	bool IsXpFarmingRound();
+	void TickXpFarmingRound();
+	void PrepareXpFarmingRound();
+	void EndXpFarmingRound();
 	void OnXpControllerChatSent();
 	void OnXpControllerChatMessage(Game::PlayerId playerId, const std::string& message);
 	bool ShouldHoldXpDrainMeeting();

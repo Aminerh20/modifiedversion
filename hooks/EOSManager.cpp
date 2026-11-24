@@ -133,6 +133,8 @@ void dEOSManager_UpdatePermissionKeys(EOSManager* __this, void* callback, Method
 void dEOSManager_Update(EOSManager* __this, MethodInfo* method) {
 	if (State.ShowHookLogs) Log.HookDebug("Hook dEOSManager_Update executed", false);
 	static bool hasDeletedDeviceId = false;
+	static int lastRecordedSpoofLevel = -1;
+	static bool recorderWasRunning = false;
 	//__this->fields.ageOfConsent = 0; //why tf does amogus have an age of consent lmao
 	//if (State.SpoofFriendCode) __this->fields.friendCode = convert_to_string(State.FakeFriendCode);
 	EOSManager_Update(__this, method);
@@ -147,14 +149,20 @@ void dEOSManager_Update(EOSManager* __this, MethodInfo* method) {
 		int fakeLevel = State.SafeMode ? std::clamp(State.FakeLevel, 1, 100001) : State.FakeLevel;
 		stats->fields.level = fakeLevel - 1;
 		AbstractSaveData_Save((AbstractSaveData*)player, NULL);
-		PlayersTab::RecordXpLevelLifecycleEvent(
-			"EOSManager.InitializePlatformInterface",
-			nullptr,
-			std::format(
-				"stats_display_level={} stats_raw_level={} save_function=AbstractSaveData.Save",
-				fakeLevel,
-				fakeLevel - 1));
+		const bool recorderRunning = PlayersTab::IsXpLevelRecorderRunning();
+		if (recorderRunning && (!recorderWasRunning || lastRecordedSpoofLevel != fakeLevel)) {
+			PlayersTab::RecordXpLevelLifecycleEvent(
+				"EOSManager.Update",
+				nullptr,
+				std::format(
+					"stats_display_level={} stats_raw_level={} save_function=AbstractSaveData.Save",
+					fakeLevel,
+					fakeLevel - 1));
+		}
+		lastRecordedSpoofLevel = fakeLevel;
+		recorderWasRunning = recorderRunning;
 	}
+	else recorderWasRunning = false;
 }
 
 String* dEOSManager_get_ProductUserId(EOSManager* __this, MethodInfo* method) {
