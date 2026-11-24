@@ -1760,7 +1760,7 @@ namespace PlayersTab {
                 if (index > 0) message += ", ";
                 message += leveledPlayers[index];
             }
-            QueueXpControllerChat(message + ".");
+            QueueXpControllerChat(message + ".", std::chrono::seconds(10));
         }
         return progressingCount > 0 || unknownCount > 0;
     }
