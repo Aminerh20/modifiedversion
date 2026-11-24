@@ -485,17 +485,26 @@ void RpcBootAllVents::Process()
     }
 }
 
-RpcSetLevel::RpcSetLevel(PlayerControl* Player, int level)
+RpcSetLevel::RpcSetLevel(PlayerControl* Player, int level, const char* source)
 {
     this->Player = Player;
     this->level = level;
+    this->source = source != nullptr ? source : "unspecified";
 }
 
 void RpcSetLevel::Process()
 {
-    if (!PlayerSelection(Player).has_value()) return;
+    const uint32_t rpcRawArgument = static_cast<uint32_t>(level) - 1u;
+    const bool targetValid = PlayerSelection(Player).has_value();
+    PlayersTab::RecordXpLevelRpcRequest(
+        targetValid ? Player : nullptr,
+        level,
+        rpcRawArgument,
+        targetValid,
+        source);
+    if (!targetValid) return;
 
-    PlayerControl_RpcSetLevel(Player, level - 1, NULL);
+    PlayerControl_RpcSetLevel(Player, rpcRawArgument, NULL);
 }
 
 RpcEndGame::RpcEndGame(GameOverReason__Enum reason)

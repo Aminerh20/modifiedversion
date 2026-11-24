@@ -165,6 +165,7 @@ void dInnerNetClient_Update(InnerNetClient* __this, MethodInfo* method) {
     if (State.ShowHookLogs) Log.HookDebug("Hook dInnerNetClient_Update executed", false);
     try {
         UiUpdateQueue::ProcessPending();
+        PlayersTab::TickXpLevelRecorder();
         // Tick outside the lobby too, so loss of host authority cancels the run.
         DrainXp::Tick();
         PlayersTab::TickXpController();
@@ -371,9 +372,9 @@ void dInnerNetClient_Update(InnerNetClient* __this, MethodInfo* method) {
             if (State.SpoofLevel && (IsInGame() || IsInLobby()) && !State.activeImpersonation) {
                 int fakeLevel = State.SafeMode ? std::clamp(State.FakeLevel, 1, 100001) : State.FakeLevel;
                 if (IsInGame() && (GetPlayerData(*Game::pLocalPlayer)->fields.PlayerLevel + 1) != fakeLevel)
-                    State.rpcQueue.push(new RpcSetLevel(*Game::pLocalPlayer, fakeLevel));
+                    State.rpcQueue.push(new RpcSetLevel(*Game::pLocalPlayer, fakeLevel, "level-spoof"));
                 else if (IsInLobby() && (GetPlayerData(*Game::pLocalPlayer)->fields.PlayerLevel + 1) != fakeLevel)
-                    State.lobbyRpcQueue.push(new RpcSetLevel(*Game::pLocalPlayer, fakeLevel));
+                    State.lobbyRpcQueue.push(new RpcSetLevel(*Game::pLocalPlayer, fakeLevel, "level-spoof"));
             }
 
             if (IsInLobby()) {
@@ -721,7 +722,10 @@ void dInnerNetClient_Update(InnerNetClient* __this, MethodInfo* method) {
                         NetworkedPlayerInfo_PlayerOutfit* outfit = GetPlayerOutfit(GetPlayerData(players[rand]));
                         if (!State.SafeMode) ImpersonateName(GetPlayerData(players[rand]));
                         ImpersonateOutfit(outfit);
-                        State.rpcQueue.push(new RpcSetLevel(*Game::pLocalPlayer, GetPlayerData(players[rand])->fields.PlayerLevel));
+                        State.rpcQueue.push(new RpcSetLevel(
+                            *Game::pLocalPlayer,
+                            GetPlayerData(players[rand])->fields.PlayerLevel,
+                            "cycle-level-impersonation"));
                         playerCycleDelay = State.CycleDuration;
                         State.activeImpersonation = true;
                     }
@@ -1777,6 +1781,10 @@ void dInnerNetClient_Update(InnerNetClient* __this, MethodInfo* method) {
 void dAmongUsClient_OnGameJoined(AmongUsClient* __this, String* gameIdString, MethodInfo* method) {
     if (State.ShowHookLogs) Log.HookDebug("Hook dAmongUsClient_OnGameJoined executed", false);
     try {
+        PlayersTab::RecordXpLevelLifecycleEvent(
+            "AmongUsClient.OnGameJoined",
+            nullptr,
+            "lobby join callback entered");
         State.AutoJoinLobby = false;
         if (!State.PanicMode) {
             Log.Debug("Joined lobby " + convert_from_string(gameIdString));
@@ -1840,6 +1848,10 @@ void dAmongUsClient_OnPlayerLeft(AmongUsClient* __this, ClientData* data, Discon
             const std::string playerName = convert_from_string(data->fields.PlayerName);
             const std::string stringReason = GetDisconnectReasonString(reason);
 
+            PlayersTab::RecordXpLevelLifecycleEvent(
+                "AmongUsClient.OnPlayerLeft",
+                data->fields.Character,
+                stringReason);
             Log.Debug(playerName + " left by reason: " + stringReason);
 
             uint8_t playerId = data->fields.Character->fields.PlayerId;
@@ -1914,7 +1926,10 @@ void dAmongUsClient_OnPlayerLeft(AmongUsClient* __this, ClientData* data, Discon
         }
         else {
             //Found this happens on game ending occasionally
-            //Log.Info(std::format("Client {} has left the game.", data->fields.Id));
+            PlayersTab::RecordXpLevelLifecycleEvent(
+                "AmongUsClient.OnPlayerLeft",
+                nullptr,
+                "player character unavailable during leave callback");
         }
     }
     catch (...) {
@@ -1955,6 +1970,13 @@ void dAmongUsClient_OnPlayerJoined(AmongUsClient* __this, ClientData* data, Meth
     }
 
     AmongUsClient_OnPlayerJoined(__this, data, method);
+    const std::string name = data->fields.PlayerName != nullptr
+        ? convert_from_string(data->fields.PlayerName)
+        : "<unavailable>";
+    PlayersTab::RecordXpLevelLifecycleEvent(
+        "AmongUsClient.OnPlayerJoined",
+        data->fields.Character,
+        std::format("player_name={}", name));
 }
 
 void dLobbyNotificationMessage_SetUp(LobbyNotificationMessage* __this, String* item, Sprite* icon, Color textColor, void* onDestroy, MethodInfo* method) {
@@ -2031,6 +2053,13 @@ void dCustomNetworkTransform_SnapTo(CustomNetworkTransform* __this, Vector2 posi
 void dAmongUsClient_OnGameEnd(AmongUsClient* __this, EndGameResult* endGameResult, MethodInfo* method) {
     if (State.ShowHookLogs) Log.HookDebug("Hook dAmongUsClient_OnGameEnd executed", false);
     try {
+        PlayersTab::RecordXpLevelLifecycleEvent(
+            "AmongUsClient.OnGameEnd",
+            Game::pLocalPlayer != nullptr ? *Game::pLocalPlayer : nullptr,
+            endGameResult != nullptr
+                ? std::format("game_over_reason={}",
+                    static_cast<int>(endGameResult->fields.GameOverReason))
+                : "end result unavailable");
         if (*Game::pLocalPlayer != NULL && GetPlayerData(*Game::pLocalPlayer)->fields.RoleType == RoleTypes__Enum::Shapeshifter)
             RoleManager_SetRole(Game::RoleManager.GetInstance(), *Game::pLocalPlayer, RoleTypes__Enum::Impostor, NULL);
         //fixes game crashing on ending with shapeshifter

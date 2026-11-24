@@ -15,8 +15,13 @@
 #include <chrono>
 #include <cctype>
 #include <deque>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <limits>
+#include <sstream>
 #include <string>
+#include <ctime>
 #include <utility>
 #include "_rpc.h"
 #include "../../improvements/DrainXp.h"
@@ -93,13 +98,10 @@ namespace PlayersTab {
         bool startsDrainFarmingPromptWindow = false;
     };
 
-    struct XpLevelBaseline {
-        uint32_t originalLevel = 0;
-        uint32_t lastLevel = 0;
-        uint32_t highestObservedLevel = 0;
-        bool patchDetected = false;
-        bool rejoinRequested = false;
+    struct XpLevelSample {
+        uint64_t lastLevel = 0;
         std::string name;
+        bool connected = true;
     };
 
     enum class XpProgressMode {
@@ -241,8 +243,12 @@ namespace PlayersTab {
     static int64_t xpPauseDeadlineRemainingMs = 0;
     static XpControllerSnapshot xpControllerSnapshot;
     static bool xpLevelRecorderRunning = false;
-    static std::unordered_map<Game::PlayerId, XpLevelBaseline> xpLevelBaselines;
-    static std::chrono::steady_clock::time_point xpLevelRejoinDeadline;
+    static std::unordered_map<Game::PlayerId, XpLevelSample> xpLevelSamples;
+    static std::filesystem::path xpLevelRecorderOutputPath;
+    static std::string xpLevelRecorderLastError;
+    static std::string xpLevelRecorderLastPhase;
+    static std::chrono::steady_clock::time_point xpLevelRecorderNextSample;
+    static constexpr auto xpLevelRecorderSampleInterval = std::chrono::milliseconds(250);
     static Game::PlayerId xpFarmingRotationCursor = 0;
     static bool xpHasFarmingRotationCursor = false;
     static constexpr auto xpRoundPrepareDelay = std::chrono::seconds(1);
@@ -267,14 +273,17 @@ namespace PlayersTab {
     static void BeginXpRolloverRound();
     static void SetShieldState(Game::PlayerId playerId, bool enabled);
     static void RestoreMatchCycleProtectionSettings();
-    static void RecordConnectedXpLevels();
-    static void CheckXpLevelPatchAfterRound();
+    static void RecordXpLevelSnapshot(const std::string& reason);
 
-    static bool IsMatchCycleHost(const PlayerControl* player) {
+    static bool IsLocalXpPlayer(const PlayerControl* player) {
         return player != nullptr
             && Game::pLocalPlayer != nullptr
             && *Game::pLocalPlayer != nullptr
             && player->fields.PlayerId == (*Game::pLocalPlayer)->fields.PlayerId;
+    }
+
+    static bool IsMatchCycleHost(const PlayerControl* player) {
+        return IsLocalXpPlayer(player);
     }
 
     static int GetMatchCycleTeamCap(size_t nonHostParticipants) {
@@ -355,7 +364,9 @@ namespace PlayersTab {
     static std::string XpPlayerName(PlayerControl* player) {
         auto data = GetPlayerData(player);
         if (data == nullptr) return "Unknown";
-        std::string name = RemoveHtmlTags(convert_from_string(NetworkedPlayerInfo_get_PlayerName(data, nullptr)));
+        auto* playerName = NetworkedPlayerInfo_get_PlayerName(data, nullptr);
+        if (playerName == nullptr) return "Unknown";
+        std::string name = RemoveHtmlTags(convert_from_string(playerName));
         return name.empty() ? "Unknown" : name;
     }
 
@@ -630,7 +641,7 @@ namespace PlayersTab {
         MigrateXpPlayerMapKey(xpLegacyFarmingFailureStreak, oldPlayerId, newPlayerId);
         MigrateXpPlayerMapKey(xpRoundProtectedKillCounts, oldPlayerId, newPlayerId);
         MigrateXpPlayerMapKey(xpRoundLevelBaselines, oldPlayerId, newPlayerId);
-        MigrateXpPlayerMapKey(xpLevelBaselines, oldPlayerId, newPlayerId);
+        MigrateXpPlayerMapKey(xpLevelSamples, oldPlayerId, newPlayerId);
 
         MigrateXpPlayerSetKey(xpFarmingCompletedPlayerIds, oldPlayerId, newPlayerId);
         MigrateXpPlayerSetKey(xpFarmingRetryPlayerIds, oldPlayerId, newPlayerId);
@@ -2236,7 +2247,6 @@ namespace PlayersTab {
     }
 
     static void HandleXpRoundReturnedToLobby() {
-        CheckXpLevelPatchAfterRound();
         if (xpControllerPhase == XpControllerPhase::ROLLOVER_LOOP) {
             ++xpDrainRoundsCompleted;
             if (xpProgressMode != XpProgressMode::LegacyChat) {
@@ -2854,34 +2864,241 @@ namespace PlayersTab {
         return true;
     }
 
-    void StartXpLevelRecorder() {
-        xpLevelRecorderRunning = true;
-        xpLevelRejoinDeadline = {};
+    static std::string XpLevelRecorderTimestamp() {
+        const auto now = std::chrono::system_clock::now();
+        const auto time = std::chrono::system_clock::to_time_t(now);
+        std::tm localTime{};
+#ifdef _WIN32
+        localtime_s(&localTime, &time);
+#else
+        localtime_r(&time, &localTime);
+#endif
+        const auto milliseconds =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                now.time_since_epoch()).count() % 1000;
+        std::ostringstream timestamp;
+        timestamp << std::put_time(&localTime, "%Y-%m-%d %H:%M:%S")
+            << '.' << std::setw(3) << std::setfill('0') << milliseconds;
+        return timestamp.str();
+    }
+
+    static std::string XpLevelRecorderQuote(const std::string& value) {
+        std::string quoted = "\"";
+        for (const char character : value) {
+            switch (character) {
+            case '\\': quoted += "\\\\"; break;
+            case '"': quoted += "\\\""; break;
+            case '\n': quoted += "\\n"; break;
+            case '\r': quoted += "\\r"; break;
+            case '\t': quoted += "\\t"; break;
+            default: quoted += character; break;
+            }
+        }
+        quoted += '"';
+        return quoted;
+    }
+
+    static std::string XpLevelRecorderContext() {
+        const char* phase = IsInLobby() ? "lobby"
+            : IsInGame() ? "game"
+            : "other";
+        return std::format(
+            "phase={} scene={}",
+            phase,
+            XpLevelRecorderQuote(State.CurrentScene));
+    }
+
+    static void FailXpLevelRecorder(const std::string& message) {
+        xpLevelRecorderRunning = false;
+        xpLevelRecorderLastError = message;
+        Log.Error("LEVEL RECORDER", message);
+        Toasts::AddToast(
+            "Level Recorder Error",
+            message,
+            ImVec4(1.f, 0.3f, 0.3f, 1.f));
+    }
+
+    static bool WriteXpLevelRecorderLine(const std::string& message) {
+        if (!xpLevelRecorderRunning || xpLevelRecorderOutputPath.empty()) return false;
+        std::ofstream output(xpLevelRecorderOutputPath, std::ios::app);
+        if (!output.is_open()) {
+            FailXpLevelRecorder(std::format(
+                "Could not open diagnostic file: {}",
+                xpLevelRecorderOutputPath.string()));
+            return false;
+        }
+        output << '[' << XpLevelRecorderTimestamp() << "] " << message << '\n';
+        output.flush();
+        if (!output) {
+            FailXpLevelRecorder(std::format(
+                "Could not write diagnostic file: {}",
+                xpLevelRecorderOutputPath.string()));
+            return false;
+        }
+        return true;
+    }
+
+    static std::string XpLevelRecorderPlayerDetails(PlayerControl* player) {
+        if (player == nullptr) return "player=unavailable";
+        auto data = GetPlayerData(player);
+        if (data == nullptr) {
+            return std::format(
+                "player_id={} name=<unavailable> data=unavailable",
+                static_cast<unsigned int>(player->fields.PlayerId));
+        }
+
+        return std::format(
+            "player_id={} name={} local={} raw_level={} displayed_level={} disconnected={} dead={}",
+            static_cast<unsigned int>(player->fields.PlayerId),
+            XpLevelRecorderQuote(XpPlayerName(player)),
+            IsLocalXpPlayer(player),
+            data->fields.PlayerLevel,
+            static_cast<uint64_t>(data->fields.PlayerLevel) + 1,
+            data->fields.Disconnected,
+            data->fields.IsDead);
+    }
+
+    static void RecordXpLevelSnapshot(const std::string& reason) {
+        if (!xpLevelRecorderRunning || (!IsInLobby() && !IsInGame())) return;
         for (auto player : GetConnectedXpPlayers()) {
-            const auto playerId = player->fields.PlayerId;
             auto data = GetPlayerData(player);
             if (data == nullptr) continue;
-            auto& baseline = xpLevelBaselines.try_emplace(playerId).first->second;
-            baseline.originalLevel = data->fields.PlayerLevel + 1;
-            baseline.lastLevel = baseline.originalLevel;
-            baseline.highestObservedLevel = baseline.originalLevel;
-            baseline.patchDetected = false;
-            baseline.rejoinRequested = false;
-            baseline.name = XpPlayerName(player);
+            const auto playerId = player->fields.PlayerId;
+            const uint64_t level = static_cast<uint64_t>(data->fields.PlayerLevel) + 1;
+            const std::string name = XpPlayerName(player);
+            const auto sample = xpLevelSamples.find(playerId);
+            if (sample == xpLevelSamples.end()) {
+                xpLevelSamples[playerId] = { level, name, true };
+            }
+            else {
+                if (!sample->second.connected) {
+                    WriteXpLevelRecorderLine(std::format(
+                        "event=player_reconnected source=snapshot player_id={} name={} context={}",
+                        static_cast<unsigned int>(playerId),
+                        XpLevelRecorderQuote(name),
+                        XpLevelRecorderContext()));
+                }
+                if (sample->second.name != name) {
+                    WriteXpLevelRecorderLine(std::format(
+                        "event=player_identity_changed player_id={} previous_name={} current_name={} context={}",
+                        static_cast<unsigned int>(playerId),
+                        XpLevelRecorderQuote(sample->second.name),
+                        XpLevelRecorderQuote(name),
+                        XpLevelRecorderContext()));
+                }
+                if (sample->second.lastLevel != level) {
+                    WriteXpLevelRecorderLine(std::format(
+                        "event=sampled_level_change source=snapshot reason={} player_id={} name={} previous_displayed_level={} current_displayed_level={} context={}",
+                        XpLevelRecorderQuote(reason),
+                        static_cast<unsigned int>(playerId),
+                        XpLevelRecorderQuote(name),
+                        sample->second.lastLevel,
+                        level,
+                        XpLevelRecorderContext()));
+                }
+                sample->second = { level, name, true };
+            }
+            WriteXpLevelRecorderLine(std::format(
+                "event=level_snapshot reason={} {} context={}",
+                XpLevelRecorderQuote(reason),
+                XpLevelRecorderPlayerDetails(player),
+                XpLevelRecorderContext()));
         }
-        NotifyXpController(
-            "Level recorder started",
-            "Baselines will be checked after each completed Match Cycle round.",
+    }
+
+    void StartXpLevelRecorder() {
+        if (xpLevelRecorderRunning) return;
+        if (!IsHost() || !IsInLobby()) {
+            FailXpLevelRecorder("Start the level diagnostic from a host lobby.");
+            return;
+        }
+
+        const auto outputDirectory = getModulePath(NULL).parent_path() / "SickoMenu";
+        std::error_code error;
+        std::filesystem::create_directories(outputDirectory, error);
+        if (error) {
+            FailXpLevelRecorder(std::format(
+                "Could not create output folder {}: {}",
+                outputDirectory.string(), error.message()));
+            return;
+        }
+
+        const auto now = std::chrono::system_clock::now();
+        const auto time = std::chrono::system_clock::to_time_t(now);
+        std::tm localTime{};
+#ifdef _WIN32
+        localtime_s(&localTime, &time);
+#else
+        localtime_r(&time, &localTime);
+#endif
+        const auto milliseconds =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                now.time_since_epoch()).count() % 1000;
+        std::ostringstream filename;
+        filename << "LEVEL-RECORDER-"
+            << std::put_time(&localTime, "%Y%m%d-%H%M%S")
+            << '-' << std::setw(3) << std::setfill('0') << milliseconds
+            << ".txt";
+        xpLevelRecorderOutputPath = outputDirectory / filename.str();
+        xpLevelRecorderLastError.clear();
+        xpLevelSamples.clear();
+        xpLevelRecorderLastPhase = IsInLobby() ? "lobby"
+            : IsInGame() ? "game"
+            : "other";
+
+        std::ofstream output(xpLevelRecorderOutputPath, std::ios::out | std::ios::trunc);
+        if (!output.is_open()) {
+            FailXpLevelRecorder(std::format(
+                "Could not create diagnostic file: {}",
+                xpLevelRecorderOutputPath.string()));
+            return;
+        }
+        output << "SickoMenu Level Diagnostic Trace\n"
+            << "File: " << xpLevelRecorderOutputPath.string() << '\n'
+            << "Purpose: passive level and lifecycle diagnostics; independent of Match Cycle.\n"
+            << "Level values: raw_level is stored 0-based; displayed_level is raw_level + 1.\n"
+            << "Sampling: connected player levels are checked every 250 ms; only changes are emitted between snapshots.\n"
+            << "Events: SetLevel calls, queued RpcSetLevel requests, saved profile-level overrides, sampled changes, phase changes, joins, leaves, and game lifecycle.\n"
+            << "SetLevel hook events include before/requested/forwarded/after values; a caller is not exposed by that game method hook.\n"
+            << "Identity: player ID and current display name only; no Friend Code or PUID is recorded.\n\n";
+        output.flush();
+        if (!output) {
+            FailXpLevelRecorder(std::format(
+                "Could not initialize diagnostic file: {}",
+                xpLevelRecorderOutputPath.string()));
+            return;
+        }
+        output.close();
+
+        xpLevelRecorderRunning = true;
+        xpLevelRecorderNextSample =
+            std::chrono::steady_clock::now() + xpLevelRecorderSampleInterval;
+        WriteXpLevelRecorderLine(std::format(
+            "event=session_started context={} match_cycle_running={}",
+            XpLevelRecorderContext(), IsXpControllerRunning()));
+        RecordXpLevelSnapshot("session_start_lobby_baseline");
+        Log.Info("LEVEL RECORDER", std::format(
+            "Started; output file: {}", xpLevelRecorderOutputPath.string()));
+        Toasts::AddToast(
+            "Level Recorder Started",
+            std::format("Writing to {}", xpLevelRecorderOutputPath.string()),
             ImVec4(0.2f, 0.8f, 1.f, 1.f));
     }
 
-    void ClearXpLevelRecorder() {
+    void StopXpLevelRecorder() {
+        if (!xpLevelRecorderRunning) return;
+        WriteXpLevelRecorderLine(std::format(
+            "event=session_stopped context={} match_cycle_running={}",
+            XpLevelRecorderContext(), IsXpControllerRunning()));
+        if (!xpLevelRecorderRunning) return;
+
         xpLevelRecorderRunning = false;
-        xpLevelBaselines.clear();
-        xpLevelRejoinDeadline = {};
-        NotifyXpController(
-            "Level recorder cleared",
-            "All saved level baselines were removed.",
+        xpLevelSamples.clear();
+        Log.Info("LEVEL RECORDER", std::format(
+            "Stopped; output file: {}", xpLevelRecorderOutputPath.string()));
+        Toasts::AddToast(
+            "Level Recorder Saved",
+            std::format("Report: {}", xpLevelRecorderOutputPath.string()),
             ImVec4(0.2f, 0.8f, 1.f, 1.f));
     }
 
@@ -2889,86 +3106,159 @@ namespace PlayersTab {
         return xpLevelRecorderRunning;
     }
 
-    static void RecordConnectedXpLevels() {
-        if (!xpLevelRecorderRunning) return;
-        for (auto player : GetConnectedXpPlayers()) {
-            if (IsMatchCycleHost(player)) continue;
-            const auto playerId = player->fields.PlayerId;
-            auto data = GetPlayerData(player);
-            if (data == nullptr) continue;
-            const uint32_t level = data->fields.PlayerLevel + 1;
-            auto it = xpLevelBaselines.find(playerId);
-            if (it == xpLevelBaselines.end()) {
-                xpLevelBaselines[playerId] = {
-                    level,
-                    level,
-                    level,
-                    false,
-                    false,
-                    XpPlayerName(player),
-                };
-            }
-            else {
-                it->second.lastLevel = level;
-                it->second.highestObservedLevel =
-                    (std::max)(it->second.highestObservedLevel, level);
-                it->second.name = XpPlayerName(player);
-            }
-        }
-    }
-
-    static void CheckXpLevelPatchAfterRound() {
-        if (!xpLevelRecorderRunning) return;
-        RecordConnectedXpLevels();
-
-        std::vector<std::string> patchedNames;
-        for (auto& [playerId, baseline] : xpLevelBaselines) {
-            if (baseline.rejoinRequested || baseline.patchDetected) continue;
-            auto player = GetPlayerControlById(playerId);
-            if (player == nullptr) continue;
-            auto data = GetPlayerData(player);
-            if (data == nullptr) continue;
-            const uint32_t currentLevel = data->fields.PlayerLevel + 1;
-            baseline.lastLevel = currentLevel;
-            if (baseline.originalLevel != 0
-                && currentLevel >= baseline.originalLevel
-                && currentLevel < baseline.highestObservedLevel) {
-                baseline.patchDetected = true;
-                baseline.rejoinRequested = true;
-                patchedNames.push_back(baseline.name);
-                LogXpControllerEvent(std::format(
-                    "Level patch rollback detected after round: playerId={}, name='{}', original={}, highestObserved={}, current={}.",
-                    playerId, baseline.name, baseline.originalLevel,
-                    baseline.highestObservedLevel, currentLevel));
-            }
-        }
-
-        if (!patchedNames.empty()) {
-            std::string names = patchedNames.front();
-            for (size_t i = 1; i < patchedNames.size(); ++i) names += ", " + patchedNames[i];
-            QueueXpControllerChat(std::format(
-                "LEVEL PATCH DETECTED: {}. Rejoin within 30 seconds.",
-                names));
-            xpLevelRejoinDeadline = std::chrono::steady_clock::now()
-                + std::chrono::seconds(30);
-        }
-    }
-
     std::string GetXpLevelRecorderStatus() {
-        if (!xpLevelRecorderRunning) return "Level recorder: OFF";
-        size_t patched = 0;
-        size_t awaiting = 0;
-        for (const auto& [playerId, baseline] : xpLevelBaselines) {
-            if (baseline.rejoinRequested || baseline.patchDetected) {
-                ++patched;
+        if (!xpLevelRecorderLastError.empty()) {
+            return std::format(
+                "Level recorder error: {}",
+                xpLevelRecorderLastError);
+        }
+        if (xpLevelRecorderRunning) {
+            return std::format(
+                "RECORDING | Output: {}",
+                xpLevelRecorderOutputPath.string());
+        }
+        if (!xpLevelRecorderOutputPath.empty()) {
+            return std::format(
+                "Stopped | Last report: {}",
+                xpLevelRecorderOutputPath.string());
+        }
+        return "Stopped | Start from a host lobby to create a report.";
+    }
+
+    void RecordXpLevelSetCall(
+        PlayerControl* player,
+        uint32_t requestedRawLevel,
+        uint32_t forwardedRawLevel,
+        uint32_t previousRawLevel,
+        uint32_t resultingRawLevel) {
+        if (!xpLevelRecorderRunning) return;
+        WriteXpLevelRecorderLine(std::format(
+            "event=level_set_call function=PlayerControl.SetLevel requested_raw_level={} forwarded_raw_level={} previous_raw_level={} previous_displayed_level={} resulting_raw_level={} resulting_displayed_level={} {} context={}",
+            requestedRawLevel,
+            forwardedRawLevel,
+            previousRawLevel,
+            static_cast<uint64_t>(previousRawLevel) + 1,
+            resultingRawLevel,
+            static_cast<uint64_t>(resultingRawLevel) + 1,
+            XpLevelRecorderPlayerDetails(player),
+            XpLevelRecorderContext()));
+        if (player != nullptr) {
+            xpLevelSamples[player->fields.PlayerId] = {
+                static_cast<uint64_t>(resultingRawLevel) + 1,
+                XpPlayerName(player),
+                true,
+            };
+        }
+    }
+
+    void RecordXpLevelRpcRequest(
+        PlayerControl* player,
+        int requestedDisplayLevel,
+        uint32_t rpcRawArgument,
+        bool targetValid,
+        const std::string& source) {
+        if (!xpLevelRecorderRunning) return;
+        WriteXpLevelRecorderLine(std::format(
+            "event=level_rpc_request function=RpcSetLevel::Process callee=PlayerControl.RpcSetLevel target_valid={} source={} requested_display_level={} rpc_raw_argument={} {} context={}",
+            targetValid,
+            XpLevelRecorderQuote(source),
+            requestedDisplayLevel,
+            rpcRawArgument,
+            XpLevelRecorderPlayerDetails(player),
+            XpLevelRecorderContext()));
+    }
+
+    void RecordXpLevelLifecycleEvent(
+        const std::string& event,
+        PlayerControl* player,
+        const std::string& details) {
+        if (!xpLevelRecorderRunning) return;
+        WriteXpLevelRecorderLine(std::format(
+            "event=lifecycle name={} details={} {} context={} match_cycle_running={}",
+            XpLevelRecorderQuote(event),
+            XpLevelRecorderQuote(details),
+            XpLevelRecorderPlayerDetails(player),
+            XpLevelRecorderContext(),
+            IsXpControllerRunning()));
+        RecordXpLevelSnapshot(std::format("{}_snapshot", event));
+    }
+
+    void TickXpLevelRecorder() {
+        if (!xpLevelRecorderRunning) return;
+        const auto now = std::chrono::steady_clock::now();
+        if (now < xpLevelRecorderNextSample) return;
+        xpLevelRecorderNextSample = now + xpLevelRecorderSampleInterval;
+
+        const std::string phase = IsInLobby() ? "lobby"
+            : IsInGame() ? "game"
+            : "other";
+        if (phase != xpLevelRecorderLastPhase) {
+            const std::string previousPhase = xpLevelRecorderLastPhase;
+            xpLevelRecorderLastPhase = phase;
+            WriteXpLevelRecorderLine(std::format(
+                "event=phase_transition from={} to={} context={}",
+                XpLevelRecorderQuote(previousPhase),
+                XpLevelRecorderQuote(phase),
+                XpLevelRecorderContext()));
+            RecordXpLevelSnapshot("phase_transition");
+        }
+
+        if (phase == "other") return;
+        std::unordered_set<Game::PlayerId> connectedPlayerIds;
+        for (auto player : GetConnectedXpPlayers()) {
+            auto data = GetPlayerData(player);
+            if (data == nullptr) continue;
+            const auto playerId = player->fields.PlayerId;
+            connectedPlayerIds.insert(playerId);
+            const uint64_t level = static_cast<uint64_t>(data->fields.PlayerLevel) + 1;
+            const std::string name = XpPlayerName(player);
+            const auto sample = xpLevelSamples.find(playerId);
+            if (sample == xpLevelSamples.end()) {
+                xpLevelSamples[playerId] = { level, name, true };
+                WriteXpLevelRecorderLine(std::format(
+                    "event=player_first_seen source=poll {} context={}",
+                    XpLevelRecorderPlayerDetails(player),
+                    XpLevelRecorderContext()));
+                continue;
             }
-            else if (baseline.originalLevel != 0) {
-                ++awaiting;
+            if (!sample->second.connected) {
+                WriteXpLevelRecorderLine(std::format(
+                    "event=player_reconnected source=poll player_id={} name={} context={}",
+                    static_cast<unsigned int>(playerId),
+                    XpLevelRecorderQuote(name),
+                    XpLevelRecorderContext()));
+                sample->second.connected = true;
+            }
+            if (sample->second.name != name) {
+                WriteXpLevelRecorderLine(std::format(
+                    "event=player_identity_changed player_id={} previous_name={} current_name={} context={}",
+                    static_cast<unsigned int>(playerId),
+                    XpLevelRecorderQuote(sample->second.name),
+                    XpLevelRecorderQuote(name),
+                    XpLevelRecorderContext()));
+                sample->second.name = name;
+            }
+            if (sample->second.lastLevel != level) {
+                WriteXpLevelRecorderLine(std::format(
+                    "event=sampled_level_change source=poll player_id={} name={} previous_displayed_level={} current_displayed_level={} context={}",
+                    static_cast<unsigned int>(playerId),
+                    XpLevelRecorderQuote(name),
+                    sample->second.lastLevel,
+                    level,
+                    XpLevelRecorderContext()));
+                sample->second.lastLevel = level;
             }
         }
-        return std::format(
-            "Level recorder: ON | {} tracked | {} patch detected | {} awaiting",
-            xpLevelBaselines.size(), patched, awaiting);
+        for (auto& [playerId, sample] : xpLevelSamples) {
+            if (!sample.connected || connectedPlayerIds.contains(playerId)) continue;
+            WriteXpLevelRecorderLine(std::format(
+                "event=player_missing source=poll player_id={} name={} last_displayed_level={} context={}",
+                static_cast<unsigned int>(playerId),
+                XpLevelRecorderQuote(sample.name),
+                sample.lastLevel,
+                XpLevelRecorderContext()));
+            sample.connected = false;
+        }
     }
 
     void OnXpControllerChatMessage(Game::PlayerId playerId, const std::string& message) {
@@ -3427,25 +3717,6 @@ namespace PlayersTab {
             State.Save();
             shieldBreakCountsDirty = false;
             lastShieldBreakCountSaveAt = now;
-        }
-        RecordConnectedXpLevels();
-        if (xpLevelRejoinDeadline != std::chrono::steady_clock::time_point{}
-            && now >= xpLevelRejoinDeadline) {
-            xpLevelRejoinDeadline = {};
-            size_t waitingCount = 0;
-            for (auto& [playerId, baseline] : xpLevelBaselines) {
-                if (!baseline.rejoinRequested) continue;
-                baseline.rejoinRequested = false;
-                ++waitingCount;
-            }
-            if (waitingCount > 0 && IsInLobby()) {
-                QueueXpControllerChat(std::format(
-                    "LEVEL PATCH rejoin window ended. {} player(s) not confirmed.",
-                    waitingCount));
-            }
-            LogXpControllerEvent(std::format(
-                "Level patch rejoin window ended for {} player(s).",
-                waitingCount));
         }
         if (!IsXpControllerRunning()) return;
         if (State.PanicMode) {
@@ -5504,7 +5775,10 @@ namespace PlayersTab {
                                 queue->push(new RpcForceHat(p, hatId));
                                 queue->push(new RpcForceNamePlate(p, namePlateId));
                                 queue->push(new RpcForceName(p, name));
-                                queue->push(new RpcSetLevel(p, selectedPlayer.get_PlayerData()->fields.PlayerLevel));
+                                queue->push(new RpcSetLevel(
+                                    p,
+                                    selectedPlayer.get_PlayerData()->fields.PlayerLevel,
+                                    "copy-avatar-to-other-players"));
                                 State.activeImpersonation = true;
                             }
                         }
@@ -5998,7 +6272,10 @@ namespace PlayersTab {
                                 queue->push(new RpcSetHat(outfit->fields.HatId));
                                 queue->push(new RpcSetNamePlate(outfit->fields.NamePlateId));
                                 if (!State.SafeMode) ImpersonateName(selectedPlayer.get_PlayerData());
-                                queue->push(new RpcSetLevel(*Game::pLocalPlayer, selectedPlayer.get_PlayerData()->fields.PlayerLevel));
+                                queue->push(new RpcSetLevel(
+                                    *Game::pLocalPlayer,
+                                    selectedPlayer.get_PlayerData()->fields.PlayerLevel,
+                                    "copy-avatar"));
                                 State.activeImpersonation = true;
                             }
                         }
@@ -6172,9 +6449,11 @@ namespace PlayersTab {
                             ImGui::InputInt("Level", &level);
                             if (AnimatedButton("Force Level")) {
                                 if (IsInGame())
-                                    State.rpcQueue.push(new RpcSetLevel(selectedPlayer.get_PlayerControl(), level));
+                                    State.rpcQueue.push(new RpcSetLevel(
+                                        selectedPlayer.get_PlayerControl(), level, "force-level"));
                                 else if (IsInLobby())
-                                    State.lobbyRpcQueue.push(new RpcSetLevel(selectedPlayer.get_PlayerControl(), level));
+                                    State.lobbyRpcQueue.push(new RpcSetLevel(
+                                        selectedPlayer.get_PlayerControl(), level, "force-level"));
                             }
                         }
                     }

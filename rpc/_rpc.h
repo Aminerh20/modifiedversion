@@ -74,8 +74,9 @@ public:
 class RpcSetLevel : public RPCInterface {
 	PlayerControl* Player;
 	int level;
+	std::string source;
 public:
-	RpcSetLevel(PlayerControl* Player, int level);
+	RpcSetLevel(PlayerControl* Player, int level, const char* source = "unspecified");
 	virtual void Process() override;
 };
 

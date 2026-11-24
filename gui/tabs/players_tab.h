@@ -65,9 +65,13 @@ namespace PlayersTab {
 	void SaveXpControllerSnapshot();
 	bool LoadXpControllerSnapshot();
 	void StartXpLevelRecorder();
-	void ClearXpLevelRecorder();
+	void StopXpLevelRecorder();
 	bool IsXpLevelRecorderRunning();
 	std::string GetXpLevelRecorderStatus();
+	void TickXpLevelRecorder();
+	void RecordXpLevelSetCall(PlayerControl* player, uint32_t requestedRawLevel, uint32_t forwardedRawLevel, uint32_t previousRawLevel, uint32_t resultingRawLevel);
+	void RecordXpLevelRpcRequest(PlayerControl* player, int requestedDisplayLevel, uint32_t rpcRawArgument, bool targetValid, const std::string& source);
+	void RecordXpLevelLifecycleEvent(const std::string& event, PlayerControl* player = nullptr, const std::string& details = "");
 	void TickXpController();
 	void OnXpControllerGameStarted();
 	void OnXpControllerProtectedCrewmateKilled(Game::PlayerId killerId, Game::PlayerId victimId);

@@ -300,21 +300,6 @@ namespace GameTab {
                     PlayersTab::SetXpFinalRejoinWindowSeconds(finalRejoinWindowSeconds);
                 }
                 ImGui::Dummy(ImVec2(4, 4) * State.dpiScale);
-                ImGui::Separator();
-                ImGui::TextDisabled("Level recorder");
-                ImGui::TextWrapped("%s", PlayersTab::GetXpLevelRecorderStatus().c_str());
-                if (!PlayersTab::IsXpLevelRecorderRunning()) {
-                    if (AnimatedButton("Start Level Recorder")) {
-                        PlayersTab::StartXpLevelRecorder();
-                    }
-                }
-                else {
-                    if (AnimatedButton("Clear Level Recorder")) {
-                        PlayersTab::ClearXpLevelRecorder();
-                    }
-                }
-
-                ImGui::Dummy(ImVec2(4, 4) * State.dpiScale);
                 const bool cycleRunning = PlayersTab::IsXpControllerRunning();
                 if (!cycleRunning) {
                     int progressMode = PlayersTab::GetXpProgressMode();
@@ -357,6 +342,30 @@ namespace GameTab {
                     if (ColoredButton(ImVec4(1.f, 0.f, 0.f, 1.f), "Stop Match Cycle")) {
                         PlayersTab::StopXpController();
                     }
+                }
+            }
+
+            if (IsInGame() || IsInLobby()) {
+                ImGui::Dummy(ImVec2(7, 7) * State.dpiScale);
+                ImGui::Separator();
+                ImGui::TextDisabled("Level diagnostic recorder (independent of Match Cycle)");
+                ImGui::TextWrapped("%s", PlayersTab::GetXpLevelRecorderStatus().c_str());
+                if (PlayersTab::IsXpLevelRecorderRunning()) {
+                    if (ColoredButton(
+                        ImVec4(1.f, 0.f, 0.f, 1.f),
+                        "Stop & Save Level Report")) {
+                        PlayersTab::StopXpLevelRecorder();
+                    }
+                }
+                else if (IsHost() && IsInLobby()) {
+                    if (AnimatedButton("Start Level Diagnostic")) {
+                        PlayersTab::StartXpLevelRecorder();
+                    }
+                    ImGui::TextWrapped(
+                        "Start in the lobby before your test. Stop after the round to close the report.");
+                }
+                else {
+                    ImGui::TextDisabled("Start is available to the host from a lobby.");
                 }
             }
 

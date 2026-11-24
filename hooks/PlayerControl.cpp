@@ -944,6 +944,10 @@ bool dPlayerControl_get_CanMove(PlayerControl* __this, MethodInfo* method) {
 void dPlayerControl_OnGameStart(PlayerControl* __this, MethodInfo* method) {
     if (State.ShowHookLogs) Log.HookDebug("Hook dPlayerControl_OnGameStart executed", false);
     try {
+        PlayersTab::RecordXpLevelLifecycleEvent(
+            "PlayerControl.OnGameStart",
+            __this,
+            "game start callback entered");
         const bool firstGameLoad = !State.GameLoaded;
         State.GameLoaded = true;
         if (Game::pLocalPlayer != nullptr && __this == *Game::pLocalPlayer) {
@@ -1798,6 +1802,10 @@ void dPlayerControl_CmdCheckProtect(PlayerControl* __this, PlayerControl* target
 void dPlayerControl_SetLevel(PlayerControl* __this, uint32_t level, MethodInfo* method) {
     if (State.ShowHookLogs) Log.HookDebug("Hook dPlayerControl_SetLevel executed", false);
 
+    const uint32_t requestedRawLevel = level;
+    const auto previousData = __this != nullptr ? GetPlayerData(__this) : nullptr;
+    const uint32_t previousRawLevel =
+        previousData != nullptr ? previousData->fields.PlayerLevel : 0;
     uint32_t playerLevel = level + 1;
 
     if (State.SMAC_CheckLevel && (IsInGame() ||
@@ -1813,7 +1821,17 @@ void dPlayerControl_SetLevel(PlayerControl* __this, uint32_t level, MethodInfo* 
 
     if (__this != *Game::pLocalPlayer && level > 2147483647) level = 2147483647; //anti level 0 exploit
 
+    const uint32_t forwardedRawLevel = level;
     PlayerControl_SetLevel(__this, level, method);
+    const auto resultingData = __this != nullptr ? GetPlayerData(__this) : nullptr;
+    const uint32_t resultingRawLevel =
+        resultingData != nullptr ? resultingData->fields.PlayerLevel : 0;
+    PlayersTab::RecordXpLevelSetCall(
+        __this,
+        requestedRawLevel,
+        forwardedRawLevel,
+        previousRawLevel,
+        resultingRawLevel);
 }
 
 PlayerBodyTypes__Enum dHideAndSeekManager_GetBodyType(HideAndSeekManager* __this, PlayerControl* player, MethodInfo* method) {

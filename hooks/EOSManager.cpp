@@ -2,6 +2,7 @@
 #include "_hooks.h"
 #include "logger.h"
 #include "state.hpp"
+#include "../gui/tabs/players_tab.h"
 #include <regex>
 
 static bool isGuestAccount = false;
@@ -146,6 +147,13 @@ void dEOSManager_Update(EOSManager* __this, MethodInfo* method) {
 		int fakeLevel = State.SafeMode ? std::clamp(State.FakeLevel, 1, 100001) : State.FakeLevel;
 		stats->fields.level = fakeLevel - 1;
 		AbstractSaveData_Save((AbstractSaveData*)player, NULL);
+		PlayersTab::RecordXpLevelLifecycleEvent(
+			"EOSManager.InitializePlatformInterface",
+			nullptr,
+			std::format(
+				"stats_display_level={} stats_raw_level={} save_function=AbstractSaveData.Save",
+				fakeLevel,
+				fakeLevel - 1));
 	}
 }
 
