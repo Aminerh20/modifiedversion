@@ -322,11 +322,18 @@ namespace PlayersTab {
     }
 
     static int GetMatchCycleTeamCap(size_t nonHostParticipants) {
-        if (nonHostParticipants >= 8 && xpAllowFourImpostors) return 4;
-        if (nonHostParticipants >= 6) return 3;
-        if (nonHostParticipants >= 4) return 2;
-        if (nonHostParticipants >= 1) return 1;
-        return 0;
+        if (nonHostParticipants == 0) return 0;
+        const size_t maxImpostors = xpAllowFourImpostors ? 4 : 3;
+        const size_t balancedTeamSize = (nonHostParticipants + 1) / 2;
+        return static_cast<int>((std::min)(balancedTeamSize, maxImpostors));
+    }
+
+    static bool IsXpRoundAssignedImpostor(Game::PlayerId playerId) {
+        const auto tracked = xpTrackedPlayers.find(playerId);
+        return std::find(xpRoundImpostorIds.begin(), xpRoundImpostorIds.end(), playerId)
+                != xpRoundImpostorIds.end()
+            && tracked != xpTrackedPlayers.end()
+            && tracked->second.was_impostor_this_round;
     }
 
     static std::chrono::milliseconds GetMatchCycleUpdateInterval() {
@@ -831,7 +838,13 @@ namespace PlayersTab {
             const bool isLocalHost = Game::pLocalPlayer != nullptr
                 && *Game::pLocalPlayer != nullptr
                 && playerId == (*Game::pLocalPlayer)->fields.PlayerId;
-            if (it == xpTrackedPlayers.end() || it->second.is_host || isLocalHost) continue;
+            if (it == xpTrackedPlayers.end() || it->second.is_host || isLocalHost
+                || !IsXpRoundAssignedImpostor(playerId)) {
+                LogXpControllerEvent(std::format(
+                    "Skipping farming completion for playerId={} because they were not an assigned Impostor in this round.",
+                    playerId));
+                continue;
+            }
 
             auto& tracked = it->second;
             tracked.was_impostor_this_round = true;
@@ -1658,7 +1671,9 @@ namespace PlayersTab {
         xpRoundLevelPeaks.clear();
         std::vector<Game::PlayerId> captureIds;
         if (farmingRound) {
-            captureIds = xpRoundImpostorIds;
+            for (const auto playerId : xpRoundImpostorIds) {
+                if (IsXpRoundAssignedImpostor(playerId)) captureIds.push_back(playerId);
+            }
         }
         else {
             for (const auto& [playerId, tracked] : xpTrackedPlayers) {
@@ -1681,7 +1696,13 @@ namespace PlayersTab {
         std::string resultSummary = "FARMING LEVEL RESULT: ";
         for (const auto playerId : xpRoundImpostorIds) {
             auto tracked = xpTrackedPlayers.find(playerId);
-            if (tracked == xpTrackedPlayers.end() || tracked->second.is_host) continue;
+            if (tracked == xpTrackedPlayers.end() || tracked->second.is_host
+                || !IsXpRoundAssignedImpostor(playerId)) {
+                LogXpControllerEvent(std::format(
+                    "Skipping farming level evaluation for playerId={} because they were not an assigned Impostor in this round.",
+                    playerId));
+                continue;
+            }
 
             const uint32_t currentLevel = GetXpObservedLevel(playerId);
             const auto baseline = xpRoundLevelBaselines.find(playerId);
@@ -1692,8 +1713,7 @@ namespace PlayersTab {
                 && !tracked->second.disconnected_during_farming_round
                 && baseline != xpRoundLevelBaselines.end()
                 && baseline->second != 0
-                && highestObservedLevel == baseline->second + 1
-                && !xpRoundGhostedBeforeFiftyPercentIds.contains(playerId);
+                && highestObservedLevel == baseline->second + 1;
 
             tracked->second.has_earned_xp = leveledUp;
             tracked->second.has_completed_objective = leveledUp;
@@ -3014,25 +3034,9 @@ namespace PlayersTab {
             if (xpProgressMode != XpProgressMode::LegacyChat
                 && HasXpFarmingRoundFailure()
                 && !xpRoundShieldFailureWaived) {
-                for (const auto playerId : xpRoundImpostorIds) {
-                    xpFarmingCompletedPlayerIds.erase(playerId);
-                    xpFarmingRetryPlayerIds.insert(playerId);
-                    auto tracked = xpTrackedPlayers.find(playerId);
-                    if (tracked == xpTrackedPlayers.end()) continue;
-                    tracked->second.has_earned_xp = false;
-                    tracked->second.has_completed_objective = false;
-                    tracked->second.farmed_this_round = false;
-                    QueueXpControllerChat(std::format(
-                        "{}: RETRY.",
-                        XpControllerChatName(tracked->second.name)));
-                }
-                xpControllerStage = XpControllerStage::LobbyDelay;
-                xpControllerDeadline = std::chrono::steady_clock::now()
-                    + xpFarmingLobbyGraceDuration;
                 LogXpControllerEvent(std::format(
-                    "Farming round failed before 50%; cleared completion for all {} assigned Impostor(s), including ghosted players. {}",
-                    xpRoundImpostorIds.size(), BuildXpControllerDiagnostics()));
-                return;
+                    "Farming safety failure recorded before level evaluation; assigned players will be evaluated from sampled level evidence after the lobby grace. {}",
+                    BuildXpControllerDiagnostics()));
             }
             if (xpProgressMode != XpProgressMode::LegacyChat) {
                 xpControllerStage = XpControllerStage::LobbyDelay;
